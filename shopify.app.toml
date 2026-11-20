@@ -6,7 +6,7 @@
 # Production: set application_url + auth.redirect_urls to the Cloud Run HTTPS origin
 # (see docs/DEPLOYMENT.md). Custom distribution — do not publish as public App Store app.
 client_id = "db1a89803399665d6c5e9980ccb722f3"
-application_url = "https://example.com"
+application_url = "https://xloxi-smart-mailer.vercel.app"
 embedded = true
 name = "XLOXI Smart Product Mailer"
 handle = "xloxi-smart-mailer"
@@ -75,7 +75,7 @@ api_version = "2026-10"
   compliance_topics = [ "shop/redact" ]
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [ "https://xloxi-smart-mailer.vercel.app/api/auth" ]
 
 [build]
 include_config_on_deploy = true
