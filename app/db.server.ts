@@ -5,11 +5,18 @@ declare global {
   var prismaGlobal: InstanceType<typeof PrismaClient> | undefined;
 }
 
-const prisma = global.prismaGlobal ?? new PrismaClient();
+/**
+ * Reuse one PrismaClient per serverless isolate.
+ * Pair with DATABASE_URL `connection_limit=1` (Supabase transaction pooler).
+ */
+const prisma =
+  global.prismaGlobal ??
+  new PrismaClient({
+    log:
+      process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
+  });
 
-if (process.env.NODE_ENV !== "production") {
-  global.prismaGlobal = prisma;
-}
+global.prismaGlobal = prisma;
 
 export default prisma;
 
