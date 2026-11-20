@@ -1,0 +1,45 @@
+# Dependencies & build output
+node_modules
+build
+.cache
+.react-router
+dist
+coverage
+*.tsbuildinfo
+
+# Git / IDE
+.git
+.github
+.vscode
+.idea
+*.swp
+.DS_Store
+
+# Env & secrets — never bake into images
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json
+service-account*.json
+
+# Tests & docs (not required at runtime)
+**/*.test.ts
+**/*.spec.ts
+vitest.config.ts
+docs
+agent-transcripts
+terminals
+
+# Shopify / local tooling noise
+.shopify
+.turbo
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Optional local artifacts
+prisma/dev.db*
+tmp
+temp

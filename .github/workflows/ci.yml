@@ -1,0 +1,285 @@
+# XLOXI Smart Product Mailer — CI and controlled deployment
+# Never enables live email. Never prints secrets.
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: "Deploy image to Cloud Run (requires Environment secrets)"
+        type: boolean
+        default: false
+      environment:
+        description: "GitHub Environment (protection rules + secrets)"
+        type: environment
+        default: staging
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  NODE_VERSION: "22"
+  SHOPIFY_APP_SKIP_ENV_VALIDATION: "1"
+  EMAIL_SENDING_ENABLED: "false"
+  EMAIL_PROVIDER: "dry_run"
+  EMAIL_PROVIDER_APPROVED: "false"
+  NODE_ENV: "test"
+
+jobs:
+  quality:
+    name: Lint · Typecheck · Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Prisma generate
+        run: npx prisma generate
+        env:
+          DATABASE_URL: postgresql://prisma:prisma@127.0.0.1:5432/prisma?schema=public
+          DIRECT_URL: postgresql://prisma:prisma@127.0.0.1:5432/prisma?schema=public
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+        env:
+          DATABASE_URL: postgresql://prisma:prisma@127.0.0.1:5432/prisma?schema=public
+          DIRECT_URL: postgresql://prisma:prisma@127.0.0.1:5432/prisma?schema=public
+          SHOPIFY_API_KEY: ci-placeholder-key
+          SHOPIFY_API_SECRET: ci-placeholder-secret
+          SHOPIFY_APP_URL: https://example.com
+
+      - name: Production build
+        run: npm run build
+        env:
+          DATABASE_URL: postgresql://prisma:prisma@127.0.0.1:5432/prisma?schema=public
+          DIRECT_URL: postgresql://prisma:prisma@127.0.0.1:5432/prisma?schema=public
+          SHOPIFY_API_KEY: ci-placeholder-key
+          SHOPIFY_API_SECRET: ci-placeholder-secret
+          SHOPIFY_APP_URL: https://example.com
+
+  test:
+    name: Automated tests
+    runs-on: ubuntu-latest
+    needs: quality
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Prisma generate
+        run: npx prisma generate
+        env:
+          DATABASE_URL: postgresql://prisma:prisma@127.0.0.1:5432/prisma
+          DIRECT_URL: postgresql://prisma:prisma@127.0.0.1:5432/prisma
+
+      - name: Unit tests (always)
+        run: >
+          npx vitest run
+          app/lib
+          app/templates
+          app/domain
+          app/shopify
+          --reporter=default
+        env:
+          UNSUBSCRIBE_SIGNING_SECRET: ci-unsub-secret
+          JOBS_SHARED_SECRET: ci-jobs-secret
+          SHOPIFY_API_KEY: ci-placeholder-key
+          SHOPIFY_API_SECRET: ci-placeholder-secret
+          SHOPIFY_APP_URL: https://example.com
+
+      - name: Integration tests (optional DATABASE_URL)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DIRECT_URL: ${{ secrets.DIRECT_URL }}
+          UNSUBSCRIBE_SIGNING_SECRET: ${{ secrets.UNSUBSCRIBE_SIGNING_SECRET }}
+          JOBS_SHARED_SECRET: ${{ secrets.JOBS_SHARED_SECRET }}
+          SHOPIFY_API_KEY: ${{ secrets.SHOPIFY_API_KEY }}
+          SHOPIFY_API_SECRET: ${{ secrets.SHOPIFY_API_SECRET }}
+          SHOPIFY_APP_URL: ${{ secrets.SHOPIFY_APP_URL }}
+          EMAIL_SENDING_ENABLED: "false"
+          EMAIL_PROVIDER: mock
+          EMAIL_PROVIDER_APPROVED: "false"
+        run: |
+          set -euo pipefail
+          if [ -z "${DATABASE_URL:-}" ]; then
+            echo "DATABASE_URL secret not set — skipping integration tests."
+            exit 0
+          fi
+          export UNSUBSCRIBE_SIGNING_SECRET="${UNSUBSCRIBE_SIGNING_SECRET:-ci-unsub-secret}"
+          export JOBS_SHARED_SECRET="${JOBS_SHARED_SECRET:-ci-jobs-secret}"
+          export SHOPIFY_API_KEY="${SHOPIFY_API_KEY:-ci-placeholder-key}"
+          export SHOPIFY_API_SECRET="${SHOPIFY_API_SECRET:-ci-placeholder-secret}"
+          export SHOPIFY_APP_URL="${SHOPIFY_APP_URL:-https://example.com}"
+          export DIRECT_URL="${DIRECT_URL:-$DATABASE_URL}"
+          npx vitest run --reporter=default
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    needs: quality
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: xloxi-smart-mailer:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Controlled Cloud Run deploy
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy == true }}
+    needs: [quality, test, docker]
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev --quiet
+
+      - name: Build and push image
+        env:
+          IMAGE: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/xloxi/smart-mailer
+        run: |
+          set -euo pipefail
+          DIGEST_TAG="sha-${GITHUB_SHA::12}"
+          docker build -t "${IMAGE}:${DIGEST_TAG}" -t "${IMAGE}:latest" .
+          docker push "${IMAGE}:${DIGEST_TAG}"
+          docker push "${IMAGE}:latest"
+          echo "IMAGE_URI=${IMAGE}:${DIGEST_TAG}" >> "$GITHUB_ENV"
+
+      - name: Deploy migrate job and execute once
+        run: |
+          set -euo pipefail
+          REGION="${{ secrets.GCP_REGION }}"
+          if gcloud run jobs describe xloxi-migrate --region="$REGION" >/dev/null 2>&1; then
+            gcloud run jobs update xloxi-migrate \
+              --image="${IMAGE_URI}" \
+              --region="$REGION" \
+              --command=npm \
+              --args=run,db:migrate \
+              --set-secrets="DATABASE_URL=DATABASE_URL:latest,DIRECT_URL=DIRECT_URL:latest" \
+              --max-retries=0 \
+              --task-timeout=15m \
+              --memory=1Gi \
+              --cpu=1
+          else
+            gcloud run jobs create xloxi-migrate \
+              --image="${IMAGE_URI}" \
+              --region="$REGION" \
+              --command=npm \
+              --args=run,db:migrate \
+              --set-secrets="DATABASE_URL=DATABASE_URL:latest,DIRECT_URL=DIRECT_URL:latest" \
+              --max-retries=0 \
+              --task-timeout=15m \
+              --memory=1Gi \
+              --cpu=1
+          fi
+          gcloud run jobs execute xloxi-migrate --region="$REGION" --wait
+
+      - name: Deploy web service
+        run: |
+          set -euo pipefail
+          gcloud run deploy xloxi-smart-mailer \
+            --image="${IMAGE_URI}" \
+            --region="${{ secrets.GCP_REGION }}" \
+            --platform=managed \
+            --allow-unauthenticated \
+            --port=8080 \
+            --cpu=1 \
+            --memory=1Gi \
+            --concurrency=80 \
+            --min-instances=0 \
+            --max-instances=10 \
+            --timeout=300 \
+            --cpu-boost \
+            --set-env-vars="NODE_ENV=production,EMAIL_SENDING_ENABLED=false,EMAIL_PROVIDER=dry_run,EMAIL_PROVIDER_APPROVED=false,PORT=8080" \
+            --set-secrets="DATABASE_URL=DATABASE_URL:latest,SHOPIFY_API_KEY=SHOPIFY_API_KEY:latest,SHOPIFY_API_SECRET=SHOPIFY_API_SECRET:latest,SHOPIFY_APP_URL=SHOPIFY_APP_URL:latest,JOBS_SHARED_SECRET=JOBS_SHARED_SECRET:latest,UNSUBSCRIBE_SIGNING_SECRET=UNSUBSCRIBE_SIGNING_SECRET:latest,SCOPES=SCOPES:latest" \
+            --command=npm \
+            --args=run,start:web
+
+      - name: Update worker Cloud Run Jobs
+        run: |
+          set -euo pipefail
+          REGION="${{ secrets.GCP_REGION }}"
+          COMMON_SECRETS="DATABASE_URL=DATABASE_URL:latest,SHOPIFY_API_KEY=SHOPIFY_API_KEY:latest,SHOPIFY_API_SECRET=SHOPIFY_API_SECRET:latest,SHOPIFY_APP_URL=SHOPIFY_APP_URL:latest,JOBS_SHARED_SECRET=JOBS_SHARED_SECRET:latest,UNSUBSCRIBE_SIGNING_SECRET=UNSUBSCRIBE_SIGNING_SECRET:latest,SCOPES=SCOPES:latest"
+          COMMON_ENV="NODE_ENV=production,EMAIL_SENDING_ENABLED=false,EMAIL_PROVIDER=dry_run,EMAIL_PROVIDER_APPROVED=false,WORKER_MAX_RUNTIME_MS=240000,WORKER_BATCH_SIZE=20,WORKER_CONCURRENCY=5"
+
+          upsert_job() {
+            local name="$1"
+            local npm_args="$2"
+            if gcloud run jobs describe "$name" --region="$REGION" >/dev/null 2>&1; then
+              gcloud run jobs update "$name" \
+                --image="${IMAGE_URI}" \
+                --region="$REGION" \
+                --command=npm \
+                --args="$npm_args" \
+                --set-env-vars="$COMMON_ENV" \
+                --set-secrets="$COMMON_SECRETS" \
+                --max-retries=1 \
+                --task-timeout=10m \
+                --memory=1Gi \
+                --cpu=1
+            else
+              gcloud run jobs create "$name" \
+                --image="${IMAGE_URI}" \
+                --region="$REGION" \
+                --command=npm \
+                --args="$npm_args" \
+                --set-env-vars="$COMMON_ENV" \
+                --set-secrets="$COMMON_SECRETS" \
+                --max-retries=1 \
+                --task-timeout=10m \
+                --memory=1Gi \
+                --cpu=1
+            fi
+          }
+
+          upsert_job xloxi-scheduler "run,worker:scheduler"
+          upsert_job xloxi-email-worker "run,worker:email"
+          upsert_job xloxi-webhook-worker "run,worker:webhooks"
+
+      - name: Safety reminder
+        run: |
+          echo "Deploy finished with EMAIL_SENDING_ENABLED=false and dry_run."
+          echo "Do not enable live sending until merchant approval."

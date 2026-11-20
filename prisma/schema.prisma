@@ -1,0 +1,588 @@
+// XLOXI Smart Product Mailer — PostgreSQL (Supabase) via Prisma
+// All business rows are shop-scoped. Timestamps are UTC (Timestamptz).
+// https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum MarketingConsentState {
+  SUBSCRIBED
+  UNSUBSCRIBED
+  NOT_SUBSCRIBED
+  PENDING
+  INVALID
+  REDACTED
+}
+
+enum EmailJobStatus {
+  PENDING
+  PROCESSING
+  RETRY_SCHEDULED
+  ACCEPTED
+  FAILED
+  CANCELLED
+  UNKNOWN
+}
+
+enum EmailEventType {
+  QUEUED
+  CLAIMED
+  SENT
+  DELIVERED
+  OPENED
+  CLICKED
+  BOUNCED
+  COMPLAINED
+  UNSUBSCRIBED
+  FAILED
+  CANCELLED
+  RETRY
+}
+
+enum SuppressionReason {
+  UNSUBSCRIBED
+  BOUNCED
+  COMPLAINED
+  MANUAL
+  REDACTED
+  INVALID_EMAIL
+}
+
+enum SyncJobType {
+  PRODUCTS
+  CUSTOMERS
+  INVENTORY
+  FULL
+}
+
+enum SyncJobStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+enum WebhookEventStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  SKIPPED
+  DUPLICATE
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  SEND
+  SKIP
+  SYNC
+  SETTINGS
+  AUTH
+  WEBHOOK
+  SYSTEM
+}
+
+/// Flow / Messaging selection lifecycle (EmailJob rows are selection batches).
+enum FlowBatchStatus {
+  NONE
+  PENDING
+  READY
+  ACKNOWLEDGED
+  FAILED
+  CANCELLED
+}
+
+// ---------------------------------------------------------------------------
+// Shopify session storage (required by @shopify/shopify-app-session-storage-prisma)
+// ---------------------------------------------------------------------------
+
+model Session {
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime? @db.Timestamptz(3)
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime? @db.Timestamptz(3)
+
+  @@index([shop])
+}
+
+// ---------------------------------------------------------------------------
+// Shop + settings
+// ---------------------------------------------------------------------------
+
+model Shop {
+  id             String    @id @default(cuid())
+  /// Canonical myshopify.com hostname, e.g. example.myshopify.com
+  shopDomain     String    @unique
+  name           String?
+  email          String?
+  currencyCode   String?   @db.VarChar(3)
+  timezone       String    @default("UTC")
+  installedAt    DateTime  @default(now()) @db.Timestamptz(3)
+  uninstalledAt  DateTime? @db.Timestamptz(3)
+  lastSyncAt     DateTime? @db.Timestamptz(3)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(3)
+
+  automationSettings AutomationSettings?
+  products           Product[]
+  productVariants    ProductVariant[]
+  subscribers        Subscriber[]
+  productHistory     ProductHistory[]
+  emailJobs          EmailJob[]
+  emailJobProducts   EmailJobProduct[]
+  emailEvents        EmailEvent[]
+  suppressions       Suppression[]
+  webhookEvents      WebhookEvent[]
+  syncJobs           SyncJob[]
+  auditLogs          AuditLog[]
+}
+
+model AutomationSettings {
+  id                 String   @id @default(cuid())
+  shopId             String   @unique
+  automationEnabled  Boolean  @default(false)
+  intervalDays       Int      @default(3)
+  productsPerEmail   Int      @default(6)
+  randomSelection    Boolean  @default(true)
+  inStockOnly        Boolean  @default(true)
+  preventDuplicates  Boolean  @default(true)
+  autoResetCycle     Boolean  @default(true)
+  /// When true, jobs run without calling a real email provider.
+  dryRun             Boolean  @default(true)
+  /// Test mode keeps live Flow automation opt-in (default on).
+  testMode           Boolean  @default(true)
+  /// Optional app-managed scheduler that tags due subscribers with xloxi-request.
+  appSchedulerEnabled Boolean @default(false)
+  fromName           String?
+  replyTo            String?
+  /// Merchant-facing From address (not a provider API secret).
+  sendingEmailAddress String?
+  /// Collection GIDs excluded from automation (persisted; applied when membership is available).
+  excludedCollectionGids Json @default("[]")
+  templateVersion    String   @default("v1")
+  /// Email branding / copy (SEDUCTIV defaults applied in renderer when null).
+  brandLogoUrl       String?
+  brandPrimaryColor  String   @default("#111111")
+  brandAccentColor   String   @default("#C4A484")
+  brandBackgroundColor String @default("#FFFFFF")
+  brandTextColor     String   @default("#222222")
+  emailSubject       String?
+  emailPreheader     String?
+  emailHeading       String?
+  emailIntroduction  String?
+  ctaText            String   @default("SHOP NOW")
+  /// Public storefront host, e.g. seductiv.net (no scheme).
+  storefrontDomain   String?
+  contactEmail       String?
+  privacyPolicyUrl   String?
+  /// Unsubscribe URL template; may include {{shopDomain}}.
+  unsubscribeUrl     String?
+  /// Max marketing emails to enqueue per scheduler run for this shop.
+  maxEmailsPerRun    Int      @default(50)
+  /// Soft hourly cap used by the scheduler (accepted + pending created).
+  maxEmailsPerHour   Int      @default(200)
+  /// Soft daily cap for merchant-facing automation settings.
+  maxEmailsPerDay    Int      @default(500)
+  /// Days to retain email events / jobs metadata (soft policy).
+  dataRetentionDays  Int      @default(365)
+  /// Non-secret integration label (shopify_messaging — app does not send email).
+  emailProviderLabel String   @default("shopify_messaging")
+  /// Product sync cadence hint for UI (minutes).
+  syncIntervalMinutes Int     @default(360)
+  createdAt          DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime @updatedAt @db.Timestamptz(3)
+
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+}
+
+/// Worker heartbeat / metrics for Cloud Run Jobs observability.
+model WorkerHeartbeat {
+  id          String   @id @default(cuid())
+  workerId    String
+  workerType  String
+  status      String   @default("running")
+  metrics     Json?
+  lastError   String?
+  startedAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+  finishedAt  DateTime? @db.Timestamptz(3)
+
+  @@index([workerType, updatedAt])
+  @@index([workerId, startedAt])
+}
+
+/// Pool-safe mutex for scheduler / single-flight workers (not session advisory locks).
+model DurableLock {
+  id          String    @id
+  lockedBy    String?
+  lockedUntil DateTime? @db.Timestamptz(3)
+  updatedAt   DateTime  @updatedAt @db.Timestamptz(3)
+}
+
+// ---------------------------------------------------------------------------
+// Catalog mirrors
+// ---------------------------------------------------------------------------
+
+model Product {
+  id                     String    @id @default(cuid())
+  shopId                 String
+  shopifyProductGid      String
+  handle                 String?
+  title                  String
+  status                 String
+  publishedToOnlineStore Boolean   @default(false)
+  /// Shopify onlineStoreUrl; null means not published to Online Store.
+  storefrontUrl          String?
+  totalInventory         Int       @default(0)
+  tracksInventory        Boolean   @default(true)
+  inStock                Boolean   @default(false)
+  eligible               Boolean   @default(false)
+  /// Merchant-excluded from automation selection (still synced).
+  excludedFromAutomation Boolean   @default(false)
+  imageUrl               String?
+  priceMin               Decimal?  @db.Decimal(18, 2)
+  priceMax               Decimal?  @db.Decimal(18, 2)
+  currencyCode           String?   @db.VarChar(3)
+  shopifyUpdatedAt       DateTime? @db.Timestamptz(3)
+  lastSyncedAt           DateTime  @default(now()) @db.Timestamptz(3)
+  deletedAt              DateTime? @db.Timestamptz(3)
+  createdAt              DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt              DateTime  @updatedAt @db.Timestamptz(3)
+
+  shop            Shop             @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  variants        ProductVariant[]
+  productHistory  ProductHistory[]
+  emailJobProducts EmailJobProduct[]
+
+  @@unique([shopId, shopifyProductGid])
+  @@index([shopId, eligible, deletedAt])
+  @@index([shopId, inStock, publishedToOnlineStore, status])
+  @@index([shopId, handle])
+  @@index([shopId, excludedFromAutomation])
+}
+
+model ProductVariant {
+  id                    String    @id @default(cuid())
+  shopId                String
+  productId             String
+  shopifyVariantGid     String
+  title                 String?
+  sku                   String?
+  barcode               String?
+  price                 Decimal?  @db.Decimal(18, 2)
+  compareAtPrice        Decimal?  @db.Decimal(18, 2)
+  inventoryQuantity     Int       @default(0)
+  inventoryItemGid      String?
+  tracksInventory       Boolean   @default(true)
+  /// Shopify ProductVariantInventoryPolicy: DENY | CONTINUE
+  inventoryPolicy       String    @default("DENY")
+  availableForSale      Boolean   @default(false)
+  shopifyUpdatedAt      DateTime? @db.Timestamptz(3)
+  deletedAt             DateTime? @db.Timestamptz(3)
+  createdAt             DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt             DateTime  @updatedAt @db.Timestamptz(3)
+
+  shop    Shop    @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([shopId, shopifyVariantGid])
+  @@index([shopId, productId])
+  @@index([shopId, inventoryItemGid])
+}
+
+// ---------------------------------------------------------------------------
+// Subscribers + cycle history
+// ---------------------------------------------------------------------------
+
+model Subscriber {
+  id                      String                @id @default(cuid())
+  shopId                  String
+  shopifyCustomerGid      String
+  email                   String
+  emailNormalized         String
+  marketingConsentState   MarketingConsentState @default(NOT_SUBSCRIBED)
+  consentUpdatedAt        DateTime?             @db.Timestamptz(3)
+  /// True when any active Suppression blocks sending.
+  isSuppressed            Boolean               @default(false)
+  eligible                Boolean               @default(false)
+  /// Merchant-paused — excluded from scheduler until resumed.
+  paused                  Boolean               @default(false)
+  currentCycleNumber      Int                   @default(1)
+  nextEmailAt             DateTime?             @db.Timestamptz(3)
+  lastSuccessfulEmailAt   DateTime?             @db.Timestamptz(3)
+  /// Mirrored from Shopify customer metafield xloxi.pending_batch_id
+  pendingBatchId          String?
+  /// Mirrored from Shopify customer metafield xloxi.processed_batch_id
+  processedBatchId        String?
+  lastProcessedAt         DateTime?             @db.Timestamptz(3)
+  deletedAt               DateTime?             @db.Timestamptz(3)
+  createdAt               DateTime              @default(now()) @db.Timestamptz(3)
+  updatedAt               DateTime              @updatedAt @db.Timestamptz(3)
+
+  shop             Shop              @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  productHistory   ProductHistory[]
+  emailJobs        EmailJob[]
+  emailEvents      EmailEvent[]
+  suppressions     Suppression[]
+
+  @@unique([shopId, shopifyCustomerGid])
+  @@unique([shopId, emailNormalized])
+  @@index([shopId, eligible, isSuppressed, nextEmailAt])
+  @@index([shopId, nextEmailAt])
+  @@index([shopId, marketingConsentState])
+  @@index([shopId, paused])
+}
+
+model ProductHistory {
+  id           String   @id @default(cuid())
+  shopId       String
+  subscriberId String
+  productId    String
+  cycleNumber  Int
+  emailJobId   String?
+  sentAt       DateTime @default(now()) @db.Timestamptz(3)
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
+
+  shop       Shop       @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  subscriber Subscriber @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+  product    Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  emailJob   EmailJob?  @relation(fields: [emailJobId], references: [id], onDelete: SetNull)
+
+  @@unique([shopId, subscriberId, productId, cycleNumber])
+  @@index([shopId, subscriberId, cycleNumber])
+  @@index([shopId, productId])
+  @@index([emailJobId])
+}
+
+// ---------------------------------------------------------------------------
+// Email jobs, snapshots, events
+// ---------------------------------------------------------------------------
+
+model EmailJob {
+  id                 String         @id @default(cuid())
+  shopId             String
+  subscriberId       String
+  /// Unique per shop — prevents duplicate sends.
+  idempotencyKey     String
+  status             EmailJobStatus @default(PENDING)
+  cycleNumber        Int
+  attemptCount       Int            @default(0)
+  maxAttempts        Int            @default(5)
+  /// Worker lease for SKIP LOCKED style claiming.
+  leaseOwner         String?
+  leaseExpiresAt     DateTime?      @db.Timestamptz(3)
+  runAt              DateTime       @default(now()) @db.Timestamptz(3)
+  nextRetryAt        DateTime?      @db.Timestamptz(3)
+  processingStartedAt DateTime?     @db.Timestamptz(3)
+  completedAt        DateTime?      @db.Timestamptz(3)
+  providerMessageId  String?
+  providerName       String?
+  lastErrorCode      String?
+  lastErrorMessage   String?
+  /// Immutable snapshot of the product batch at enqueue/claim time.
+  productSnapshot    Json
+  dryRun             Boolean        @default(true)
+  /// Flow selection lifecycle (app no longer sends email).
+  flowStatus         FlowBatchStatus @default(NONE)
+  /// flow_request | app_scheduler | test | legacy
+  triggerSource      String?
+  flowReadyAt        DateTime?      @db.Timestamptz(3)
+  acknowledgedAt     DateTime?      @db.Timestamptz(3)
+  createdAt          DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime       @updatedAt @db.Timestamptz(3)
+
+  shop             Shop              @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  subscriber       Subscriber        @relation(fields: [subscriberId], references: [id], onDelete: Cascade)
+  products         EmailJobProduct[]
+  events           EmailEvent[]
+  productHistory   ProductHistory[]
+
+  @@unique([shopId, idempotencyKey])
+  @@index([shopId, status, runAt])
+  @@index([shopId, status, nextRetryAt])
+  @@index([shopId, subscriberId, status])
+  @@index([shopId, flowStatus, createdAt])
+  @@index([status, leaseExpiresAt])
+  @@index([providerMessageId])
+}
+
+/// Immutable per-job product line items (batch snapshot rows).
+model EmailJobProduct {
+  id              String   @id @default(cuid())
+  shopId          String
+  emailJobId      String
+  productId       String
+  position        Int
+  shopifyProductGid String
+  title           String
+  handle          String?
+  imageUrl        String?
+  price           Decimal? @db.Decimal(18, 2)
+  currencyCode    String?  @db.VarChar(3)
+  productUrl      String?
+  createdAt       DateTime @default(now()) @db.Timestamptz(3)
+
+  shop     Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  emailJob EmailJob @relation(fields: [emailJobId], references: [id], onDelete: Cascade)
+  product  Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@unique([emailJobId, productId])
+  @@unique([emailJobId, position])
+  @@index([shopId, emailJobId])
+}
+
+model EmailEvent {
+  id                String         @id @default(cuid())
+  shopId            String
+  emailJobId        String?
+  subscriberId      String?
+  type              EmailEventType
+  providerEventId   String?
+  providerMessageId String?
+  payload           Json?
+  occurredAt        DateTime       @default(now()) @db.Timestamptz(3)
+  createdAt         DateTime       @default(now()) @db.Timestamptz(3)
+
+  shop       Shop        @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  emailJob   EmailJob?   @relation(fields: [emailJobId], references: [id], onDelete: SetNull)
+  subscriber Subscriber? @relation(fields: [subscriberId], references: [id], onDelete: SetNull)
+
+  @@unique([shopId, providerEventId])
+  @@index([shopId, type, occurredAt])
+  @@index([shopId, emailJobId])
+  @@index([shopId, subscriberId])
+}
+
+model Suppression {
+  id           String            @id @default(cuid())
+  shopId       String
+  subscriberId String?
+  emailNormalized String
+  reason       SuppressionReason
+  source       String?
+  active       Boolean           @default(true)
+  notes        String?
+  createdAt    DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime          @updatedAt @db.Timestamptz(3)
+  liftedAt     DateTime?         @db.Timestamptz(3)
+
+  shop       Shop        @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  subscriber Subscriber? @relation(fields: [subscriberId], references: [id], onDelete: SetNull)
+
+  @@unique([shopId, emailNormalized, reason])
+  @@index([shopId, active, emailNormalized])
+  @@index([shopId, subscriberId])
+}
+
+// ---------------------------------------------------------------------------
+// Webhooks, sync, audit
+// ---------------------------------------------------------------------------
+
+model WebhookEvent {
+  id              String             @id @default(cuid())
+  shopId          String?
+  shopDomain      String
+  topic           String
+  /// Shopify webhook idempotency / dedupe key (X-Shopify-Webhook-Id).
+  webhookId       String
+  apiVersion      String?
+  status          WebhookEventStatus @default(PENDING)
+  attemptCount    Int                @default(0)
+  maxAttempts     Int                @default(5)
+  nextRetryAt     DateTime?          @db.Timestamptz(3)
+  leaseOwner      String?
+  leaseExpiresAt  DateTime?          @db.Timestamptz(3)
+  /// Resource GID when known (product/customer/inventory item) — never an email.
+  resourceGid     String?
+  /// Shopify resource updated_at for out-of-order detection.
+  resourceUpdatedAt DateTime?        @db.Timestamptz(3)
+  payloadHash     String?
+  /// Minimal safe fields only (ids, quantities). Never emails/tokens.
+  safePayload     Json?
+  processedAt     DateTime?          @db.Timestamptz(3)
+  lastError       String?
+  /// @deprecated use lastError
+  processingError String?
+  createdAt       DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime           @updatedAt @db.Timestamptz(3)
+
+  shop Shop? @relation(fields: [shopId], references: [id], onDelete: SetNull)
+
+  @@unique([webhookId])
+  @@unique([shopDomain, topic, webhookId])
+  @@index([shopDomain, topic, createdAt])
+  @@index([shopId, createdAt])
+  @@index([status, nextRetryAt])
+  @@index([status, createdAt])
+}
+
+model SyncJob {
+  id           String        @id @default(cuid())
+  shopId       String
+  type         SyncJobType
+  status       SyncJobStatus @default(PENDING)
+  idempotencyKey String
+  cursor       String?
+  attemptCount Int           @default(0)
+  leaseOwner   String?
+  leaseExpiresAt DateTime?   @db.Timestamptz(3)
+  runAt        DateTime      @default(now()) @db.Timestamptz(3)
+  startedAt    DateTime?     @db.Timestamptz(3)
+  completedAt  DateTime?     @db.Timestamptz(3)
+  stats        Json?
+  lastError    String?
+  createdAt    DateTime      @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime      @updatedAt @db.Timestamptz(3)
+
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@unique([shopId, idempotencyKey])
+  @@index([shopId, status, runAt])
+  @@index([shopId, type, status])
+}
+
+model AuditLog {
+  id         String      @id @default(cuid())
+  shopId     String?
+  action     AuditAction
+  entityType String
+  entityId   String?
+  actorType  String      @default("system")
+  actorId    String?
+  /// Never store raw emails, tokens, or secrets here.
+  metadata   Json?
+  createdAt  DateTime    @default(now()) @db.Timestamptz(3)
+
+  shop Shop? @relation(fields: [shopId], references: [id], onDelete: SetNull)
+
+  @@index([shopId, createdAt])
+  @@index([shopId, entityType, entityId])
+  @@index([action, createdAt])
+}

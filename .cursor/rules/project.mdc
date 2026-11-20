@@ -1,0 +1,42 @@
+---
+description: XLOXI Smart Product Mailer — always-on project rules
+globs:
+alwaysApply: true
+---
+
+# XLOXI Smart Product Mailer
+
+You are working on **XLOXI Smart Product Mailer** by **XLOXI PVT LTD**, an embedded Shopify app for store https://seductiv.net/ (Shopify **Basic**).
+
+## Authority
+
+- Follow `AGENTS.md`, `docs/ARCHITECTURE.md`, and `docs/IMPLEMENTATION_PLAN.md`.
+- Phase 0 is architecture/docs only. Do **not** implement later phases unless the user explicitly asks.
+- Inspect the repo before editing. Reuse `app/shopify.server.ts` authentication and Prisma session storage.
+
+## Shopify constraints
+
+- Use Admin GraphQL only; verify fields against official docs for the pinned API version.
+- Never invent REST/GraphQL endpoints or scopes.
+- Stay compatible with Shopify Basic (no Plus, no paid Flow, no n8n, no Shopify Messaging send API assumption).
+- Distribution: Custom → `AppDistribution.SingleMerchant` (keep App Bridge). Never `ShopifyAdmin` for this embedded app.
+- Admin GraphQL version: `2026-10` (`ApiVersion.October26`). No REST Admin APIs.
+- Scopes: `read_products`, `read_inventory`, `read_customers`, `write_customers`.
+- Required consent gate: `customer.emailMarketingConsent.marketingState === SUBSCRIBED` (requires `read_customers`).
+- Product eligibility: `status = ACTIVE`, published to Online Store, in stock (see Architecture).
+- Never trust a shop domain from an unauthenticated request for privileged work.
+
+
+## Data & security
+
+- Shop-level isolation on every table and query.
+- Secrets and tokens server-only; never log emails, tokens, or API keys.
+- `EMAIL_SENDING_ENABLED` defaults to `false`; default provider is NoOp/console.
+- Do not deploy or send real emails without explicit user approval.
+
+## Engineering
+
+- Strict TypeScript, modular packages under `app/` (services, jobs, email, shopify).
+- Durable PostgreSQL job queue; prevent duplicate emails and concurrent double-processing.
+- Vitest for domain logic (eligibility, cycle selection, idempotency, unsubscribe).
+- Do not delete working template features until a phase replaces them intentionally.

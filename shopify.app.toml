@@ -1,0 +1,82 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+#
+# Distribution: Custom (Partner Dashboard) → SDK AppDistribution.SingleMerchant
+# Keeps OAuth + App Bridge embedded auth (do NOT use AppDistribution.ShopifyAdmin).
+
+# Production: set application_url + auth.redirect_urls to the Cloud Run HTTPS origin
+# (see docs/DEPLOYMENT.md). Custom distribution — do not publish as public App Store app.
+client_id = "db1a89803399665d6c5e9980ccb722f3"
+application_url = "https://example.com"
+embedded = true
+name = "XLOXI Smart Product Mailer"
+handle = "xloxi-smart-mailer"
+
+[access_scopes]
+# Least privilege for Smart Product Mailer (Shopify Basic compatible).
+# write_customers: sync unsubscribe / marketing consent updates.
+# Merchants must re-authorize after scope changes.
+scopes = "read_products,read_inventory,read_customers,write_customers"
+
+[webhooks]
+api_version = "2026-10"
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/uninstalled"
+  topics = [ "app/uninstalled" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/scopes_update"
+  topics = [ "app/scopes_update" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/products/create"
+  topics = [ "products/create" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/products/update"
+  topics = [ "products/update" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/products/delete"
+  topics = [ "products/delete" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/inventory_levels/update"
+  topics = [ "inventory_levels/update" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/customers/create"
+  topics = [ "customers/create" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/customers/update"
+  topics = [ "customers/update" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/customers/delete"
+  topics = [ "customers/delete" ]
+
+  # Verified for Admin API 2026-10: CUSTOMERS_EMAIL_MARKETING_CONSENT_UPDATE
+  # Requires read_customers. Payload is a hint — processor re-fetches Customer via GraphQL.
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/customers/email_marketing_consent/update"
+  topics = [ "customers_email_marketing_consent/update" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/customers/data_request"
+  compliance_topics = [ "customers/data_request" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/customers/redact"
+  compliance_topics = [ "customers/redact" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/shop/redact"
+  compliance_topics = [ "shop/redact" ]
+
+[auth]
+redirect_urls = [ "https://example.com/api/auth" ]
+
+[build]
+include_config_on_deploy = true
+automatically_update_urls_on_dev = true
