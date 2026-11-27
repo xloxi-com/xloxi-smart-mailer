@@ -28,7 +28,7 @@ import {
   cancelStaleProductSyncJobs,
   enqueueProductSyncJob,
   getProductSyncStatus,
-  processProductSyncJobUntilBudget,
+  processProductSyncJobTick,
 } from "../jobs/product-sync.server";
 import {
   clampPage,
@@ -98,7 +98,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               fullReconcile: true,
             })
           : undefined;
-      const result = await processProductSyncJobUntilBudget({
+      const result = await processProductSyncJobTick({
         shopDomain: shop,
         client: admin,
         jobId: job?.id,

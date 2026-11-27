@@ -11,7 +11,6 @@ import {
 } from "../lib/safe-error.server";
 import type { AdminGraphqlClient } from "../shopify/admin-graphql.server";
 import { ensureShop } from "../services/shop.server";
-import { PRODUCT_SYNC_REQUEST_BUDGET_MS } from "../services/shopify-graphql.server";
 import {
   getCatalogSyncProgress,
   runProductSyncTick,
@@ -347,41 +346,3 @@ export async function cancelStaleProductSyncJobs(
   return result.count;
 }
 
-/**
- * Run as many ticks as fit in the request budget so the browser needs fewer
- * round-trips for typical catalogs (~100 products).
- */
-export async function processProductSyncJobUntilBudget(options: {
-  shopDomain: string;
-  client: AdminGraphqlClient;
-  jobId?: string;
-  budgetMs?: number;
-}): Promise<{
-  job: SyncJob;
-  stats: ProductSyncStats;
-  progress: Awaited<ReturnType<typeof getCatalogSyncProgress>>;
-}> {
-  const budgetMs = options.budgetMs ?? PRODUCT_SYNC_REQUEST_BUDGET_MS;
-  const started = Date.now();
-  let jobId = options.jobId;
-  let last = await processProductSyncJobTick({
-    shopDomain: options.shopDomain,
-    client: options.client,
-    jobId,
-  });
-  jobId = last.job.id;
-
-  while (
-    last.stats.hasMore &&
-    last.job.status === SyncJobStatus.RUNNING &&
-    Date.now() - started < budgetMs
-  ) {
-    last = await processProductSyncJobTick({
-      shopDomain: options.shopDomain,
-      client: options.client,
-      jobId,
-    });
-  }
-
-  return last;
-}

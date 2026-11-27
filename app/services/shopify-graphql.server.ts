@@ -5,18 +5,14 @@
 import type { AdminGraphqlClient } from "../shopify/admin-graphql.server";
 import { adminGraphql } from "../shopify/admin-graphql.server";
 
-export const PRODUCT_SYNC_PAGE_SIZE = 25;
+/** Keep pages small so each Sync POST finishes before proxy/Vercel timeouts. */
+export const PRODUCT_SYNC_PAGE_SIZE = 10;
 /** Catalogs at or above this size use Bulk Operations instead of deep pagination. */
 export const BULK_SYNC_THRESHOLD = 500;
-/**
- * Max GraphQL pages per Sync Now / job tick (resumable via cursor).
- * Batched DB writes keep 1–2 pages safe under embedded-admin timeouts.
- */
-export const PAGES_PER_TICK = 2;
-/** Soft wall-clock budget per tick; leave early with hasMore when exceeded. */
-export const PRODUCT_SYNC_TICK_BUDGET_MS = 12_000;
-/** Max time one Sync products POST may spend running ticks server-side. */
-export const PRODUCT_SYNC_REQUEST_BUDGET_MS = 10_000;
+/** One GraphQL page per tick — resumable; UI auto-continues with sync_tick. */
+export const PAGES_PER_TICK = 1;
+/** Soft wall-clock budget per tick (single page should finish well under this). */
+export const PRODUCT_SYNC_TICK_BUDGET_MS = 8_000;
 
 export type ShopifyMoney = {
   amount: string;
