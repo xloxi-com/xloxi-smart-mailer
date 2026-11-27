@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   ActionFunctionArgs,
   HeadersFunction,
@@ -25,9 +25,10 @@ import {
   setProductsExcluded,
 } from "../services/admin-products.server";
 import {
+  cancelStaleProductSyncJobs,
   enqueueProductSyncJob,
   getProductSyncStatus,
-  processProductSyncJobTick,
+  processProductSyncJobUntilBudget,
 } from "../jobs/product-sync.server";
 import {
   clampPage,
@@ -41,6 +42,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { shop, missingScopes } = await requireAdminAuth(request);
   const shopRow = await ensureShop(shop);
   const url = new URL(request.url);
+
+  await cancelStaleProductSyncJobs(shop);
 
   const list = await listAdminProducts({
     shopId: shopRow.id,
@@ -61,7 +64,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const syncError =
     latestJob?.status === "FAILED" && latestJob.lastError
       ? toMerchantSafeError(latestJob.lastError)
-      : null;
+      : latestJob?.status === "CANCELLED" && latestJob.lastError
+        ? toMerchantSafeError(latestJob.lastError)
+        : null;
 
   return {
     shop,
@@ -93,23 +98,44 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               fullReconcile: true,
             })
           : undefined;
-      const result = await processProductSyncJobTick({
+      const result = await processProductSyncJobUntilBudget({
         shopDomain: shop,
         client: admin,
         jobId: job?.id,
       });
       const failed = result.job.status === "FAILED";
+      const jobStats =
+        result.job.stats && typeof result.job.stats === "object"
+          ? (result.job.stats as Record<string, unknown>)
+          : {};
       return {
         ok: !failed,
         intent,
-        hasMore: result.stats.hasMore,
+        hasMore: result.stats.hasMore && result.job.status === "RUNNING",
         jobStatus: result.job.status,
         stats: {
-          processed: result.stats.processed,
-          upserted: result.stats.upserted,
-          eligible: result.stats.eligible,
-          errors: result.stats.errors,
+          processed:
+            typeof jobStats.processed === "number"
+              ? jobStats.processed
+              : result.stats.processed,
+          upserted:
+            typeof jobStats.upserted === "number"
+              ? jobStats.upserted
+              : result.stats.upserted,
+          eligible:
+            typeof jobStats.eligible === "number"
+              ? jobStats.eligible
+              : result.stats.eligible,
+          errors:
+            typeof jobStats.errors === "number"
+              ? jobStats.errors
+              : result.stats.errors,
+          shopifyProductCount:
+            typeof jobStats.shopifyProductCount === "number"
+              ? jobStats.shopifyProductCount
+              : result.stats.shopifyProductCount,
           phase: result.stats.phase,
+          mirroredProducts: result.progress.mirroredProducts,
         },
         error: failed
           ? result.job.lastError ?? "Product synchronization failed"
@@ -159,20 +185,34 @@ export default function ProductsPage() {
   const shopify = useAppBridge();
   const [params] = useSearchParams();
   const [selected, setSelected] = useState<string[]>([]);
+  const syncStartedAt = useRef<number | null>(null);
+  const lastHandledData = useRef<unknown>(null);
 
+  const isSyncIntent =
+    fetcher.formData?.get("intent") === "sync_start" ||
+    fetcher.formData?.get("intent") === "sync_tick" ||
+    fetcher.data?.intent === "sync_start" ||
+    fetcher.data?.intent === "sync_tick";
   const isLoading =
     ["loading", "submitting"].includes(fetcher.state) &&
     fetcher.formMethod === "POST";
+  const syncing =
+    isSyncIntent &&
+    (isLoading || fetcher.data?.hasMore === true);
   const hasMore = fetcher.data?.hasMore === true;
   const totalPages = Math.max(1, Math.ceil(list.total / list.pageSize));
+  const syncStats = fetcher.data?.stats;
 
   useEffect(() => {
-    if (!fetcher.data) return;
+    if (!fetcher.data || fetcher.data === lastHandledData.current) return;
+    lastHandledData.current = fetcher.data;
+
     if (
       (fetcher.data.intent === "sync_start" ||
         fetcher.data.intent === "sync_tick") &&
       !fetcher.data.ok
     ) {
+      syncStartedAt.current = null;
       shopify.toast.show(
         fetcher.data.error ?? "Product synchronization failed",
         { isError: true },
@@ -181,15 +221,21 @@ export default function ProductsPage() {
       return;
     }
     if (!fetcher.data.ok) return;
+
     if (fetcher.data.intent === "sync_start" || fetcher.data.intent === "sync_tick") {
-      shopify.toast.show(
-        fetcher.data.hasMore
-          ? "Product sync in progress"
-          : fetcher.data.jobStatus === "FAILED"
+      if (!fetcher.data.hasMore) {
+        syncStartedAt.current = null;
+        shopify.toast.show(
+          fetcher.data.jobStatus === "FAILED"
             ? "Product sync finished with errors"
-            : "Product sync complete",
-      );
-    } else if (fetcher.data.intent === "exclude") {
+            : `Product sync complete · ${fetcher.data.stats?.mirroredProducts ?? fetcher.data.stats?.processed ?? 0} products`,
+        );
+        revalidator.revalidate();
+      }
+      return;
+    }
+
+    if (fetcher.data.intent === "exclude") {
       shopify.toast.show(`Excluded ${fetcher.data.count ?? 0} product(s)`);
       setSelected([]);
     } else if (fetcher.data.intent === "include") {
@@ -205,9 +251,25 @@ export default function ProductsPage() {
     if (!hasMore || isLoading) return;
     const timer = window.setTimeout(() => {
       fetcher.submit({ intent: "sync_tick" }, { method: "POST" });
-    }, 750);
+    }, 250);
     return () => window.clearTimeout(timer);
   }, [hasMore, isLoading, fetcher]);
+
+  // Hard stop if a single POST hangs (proxy/tunnel timeout).
+  useEffect(() => {
+    if (!isLoading || !isSyncIntent) return;
+    if (syncStartedAt.current == null) syncStartedAt.current = Date.now();
+    const timer = window.setTimeout(() => {
+      if (!isLoading) return;
+      syncStartedAt.current = null;
+      shopify.toast.show(
+        "Product sync timed out. Click Sync products to continue.",
+        { isError: true },
+      );
+      revalidator.revalidate();
+    }, 45_000);
+    return () => window.clearTimeout(timer);
+  }, [isLoading, isSyncIntent, shopify, revalidator]);
 
   const toggle = (id: string) => {
     setSelected((prev) =>
@@ -221,17 +283,33 @@ export default function ProductsPage() {
     return `/app/products?${next.toString()}`;
   };
 
+  const startSync = () => {
+    if (syncing) return;
+    syncStartedAt.current = Date.now();
+    fetcher.submit({ intent: "sync_start" }, { method: "POST" });
+  };
+
   return (
     <s-page heading="Products">
       <s-button
         slot="primary-action"
-        onClick={() =>
-          fetcher.submit({ intent: "sync_start" }, { method: "POST" })
-        }
-        {...(isLoading ? { loading: true } : {})}
+        onClick={startSync}
+        {...(syncing ? { loading: true, disabled: true } : {})}
       >
-        Sync products
+        {syncing ? "Syncing…" : "Sync products"}
       </s-button>
+
+      {syncing ? (
+        <s-banner tone="info" heading="Product sync running">
+          {syncStats?.processed != null
+            ? `Imported ${syncStats.processed}${
+                syncStats.shopifyProductCount != null
+                  ? ` / ${syncStats.shopifyProductCount}`
+                  : ""
+              } products…`
+            : "Importing your Online Store catalog…"}
+        </s-banner>
+      ) : null}
 
       <s-section heading="Filters">
         <Form method="get">
@@ -292,11 +370,7 @@ export default function ProductsPage() {
       ) : null}
 
       <s-section
-        heading={`Catalog (${list.total}${
-          syncStatus.eligibleProducts != null
-            ? ` · ${syncStatus.eligibleProducts} eligible`
-            : ""
-        })`}
+        heading={`Catalog (${list.total} · ${syncStatus.eligibleProducts} eligible)`}
       >
         {selected.length > 0 ? (
           <s-stack direction="inline" gap="base">

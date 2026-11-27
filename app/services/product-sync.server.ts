@@ -144,131 +144,131 @@ export async function upsertMirroredProduct(
 ): Promise<{ eligible: boolean }> {
   const mapped = mapShopifyProductToMirror(node, inStockOnly, options);
 
-  const product = await prisma.product.upsert({
-    where: {
-      shopId_shopifyProductGid: {
-        shopId,
-        shopifyProductGid: mapped.shopifyProductGid,
-      },
-    },
-    create: {
-      shopId,
-      shopifyProductGid: mapped.shopifyProductGid,
-      handle: mapped.handle,
-      title: mapped.title,
-      status: mapped.status,
-      publishedToOnlineStore: mapped.publishedToOnlineStore,
-      storefrontUrl: mapped.storefrontUrl,
-      totalInventory: mapped.totalInventory,
-      tracksInventory: mapped.tracksInventory,
-      inStock: mapped.inStock,
-      eligible: mapped.eligible,
-      imageUrl: mapped.imageUrl,
-      priceMin: mapped.priceMin,
-      priceMax: mapped.priceMax,
-      currencyCode: mapped.currencyCode,
-      shopifyUpdatedAt: mapped.shopifyUpdatedAt,
-      lastSyncedAt: mapped.lastSyncedAt,
-      deletedAt: null,
-    },
-    update: {
-      handle: mapped.handle,
-      title: mapped.title,
-      status: mapped.status,
-      publishedToOnlineStore: mapped.publishedToOnlineStore,
-      storefrontUrl: mapped.storefrontUrl,
-      totalInventory: mapped.totalInventory,
-      tracksInventory: mapped.tracksInventory,
-      inStock: mapped.inStock,
-      eligible: mapped.eligible,
-      imageUrl: mapped.imageUrl,
-      priceMin: mapped.priceMin,
-      priceMax: mapped.priceMax,
-      currencyCode: mapped.currencyCode,
-      shopifyUpdatedAt: mapped.shopifyUpdatedAt,
-      lastSyncedAt: mapped.lastSyncedAt,
-      deletedAt: null,
-    },
-  });
-
-  const seenVariantGids = new Set<string>();
-
-  for (const v of mapped.variants) {
-    seenVariantGids.add(v.id);
-    const tracks = v.inventoryItem?.tracked ?? true;
-    const policy = normalizeInventoryPolicy(v.inventoryPolicy);
-    const qty = v.inventoryQuantity ?? 0;
-    const sellable = isVariantSellable({
-      tracksInventory: tracks,
-      inventoryPolicy: policy,
-      inventoryQuantity: qty,
-      availableForSale: v.availableForSale,
-    });
-
-    await prisma.productVariant.upsert({
+  await prisma.$transaction(async (tx) => {
+    const product = await tx.product.upsert({
       where: {
-        shopId_shopifyVariantGid: {
+        shopId_shopifyProductGid: {
           shopId,
-          shopifyVariantGid: v.id,
+          shopifyProductGid: mapped.shopifyProductGid,
         },
       },
       create: {
         shopId,
-        productId: product.id,
-        shopifyVariantGid: v.id,
-        title: v.title,
-        sku: v.sku,
-        barcode: v.barcode,
-        // Persist Shopify prices for sellable variants; null out advertised
-        // prices when not sellable so we never surface unavailable prices.
-        price: sellable ? new Prisma.Decimal(v.price) : null,
-        compareAtPrice:
-          sellable && v.compareAtPrice
-            ? new Prisma.Decimal(v.compareAtPrice)
-            : null,
-        inventoryQuantity: qty,
-        inventoryItemGid: v.inventoryItem?.id ?? null,
-        tracksInventory: tracks,
-        inventoryPolicy: policy,
-        availableForSale: sellable,
-        shopifyUpdatedAt: new Date(v.updatedAt),
+        shopifyProductGid: mapped.shopifyProductGid,
+        handle: mapped.handle,
+        title: mapped.title,
+        status: mapped.status,
+        publishedToOnlineStore: mapped.publishedToOnlineStore,
+        storefrontUrl: mapped.storefrontUrl,
+        totalInventory: mapped.totalInventory,
+        tracksInventory: mapped.tracksInventory,
+        inStock: mapped.inStock,
+        eligible: mapped.eligible,
+        imageUrl: mapped.imageUrl,
+        priceMin: mapped.priceMin,
+        priceMax: mapped.priceMax,
+        currencyCode: mapped.currencyCode,
+        shopifyUpdatedAt: mapped.shopifyUpdatedAt,
+        lastSyncedAt: mapped.lastSyncedAt,
         deletedAt: null,
       },
       update: {
-        productId: product.id,
-        title: v.title,
-        sku: v.sku,
-        barcode: v.barcode,
-        price: sellable ? new Prisma.Decimal(v.price) : null,
-        compareAtPrice:
-          sellable && v.compareAtPrice
-            ? new Prisma.Decimal(v.compareAtPrice)
-            : null,
-        inventoryQuantity: qty,
-        inventoryItemGid: v.inventoryItem?.id ?? null,
-        tracksInventory: tracks,
-        inventoryPolicy: policy,
-        availableForSale: sellable,
-        shopifyUpdatedAt: new Date(v.updatedAt),
+        handle: mapped.handle,
+        title: mapped.title,
+        status: mapped.status,
+        publishedToOnlineStore: mapped.publishedToOnlineStore,
+        storefrontUrl: mapped.storefrontUrl,
+        totalInventory: mapped.totalInventory,
+        tracksInventory: mapped.tracksInventory,
+        inStock: mapped.inStock,
+        eligible: mapped.eligible,
+        imageUrl: mapped.imageUrl,
+        priceMin: mapped.priceMin,
+        priceMax: mapped.priceMax,
+        currencyCode: mapped.currencyCode,
+        shopifyUpdatedAt: mapped.shopifyUpdatedAt,
+        lastSyncedAt: mapped.lastSyncedAt,
         deletedAt: null,
       },
     });
-  }
 
-  // Soft-delete variants no longer returned (keep history via product FK).
-  await prisma.productVariant.updateMany({
-    where: {
-      shopId,
-      productId: product.id,
-      deletedAt: null,
-      shopifyVariantGid: { notIn: [...seenVariantGids] },
-    },
-    data: {
-      deletedAt: new Date(),
-      availableForSale: false,
-      price: null,
-      compareAtPrice: null,
-    },
+    const seenVariantGids = mapped.variants.map((v) => v.id);
+
+    await Promise.all(
+      mapped.variants.map((v) => {
+        const tracks = v.inventoryItem?.tracked ?? true;
+        const policy = normalizeInventoryPolicy(v.inventoryPolicy);
+        const qty = v.inventoryQuantity ?? 0;
+        const sellable = isVariantSellable({
+          tracksInventory: tracks,
+          inventoryPolicy: policy,
+          inventoryQuantity: qty,
+          availableForSale: v.availableForSale,
+        });
+
+        return tx.productVariant.upsert({
+          where: {
+            shopId_shopifyVariantGid: {
+              shopId,
+              shopifyVariantGid: v.id,
+            },
+          },
+          create: {
+            shopId,
+            productId: product.id,
+            shopifyVariantGid: v.id,
+            title: v.title,
+            sku: v.sku,
+            barcode: v.barcode,
+            price: sellable ? new Prisma.Decimal(v.price) : null,
+            compareAtPrice:
+              sellable && v.compareAtPrice
+                ? new Prisma.Decimal(v.compareAtPrice)
+                : null,
+            inventoryQuantity: qty,
+            inventoryItemGid: v.inventoryItem?.id ?? null,
+            tracksInventory: tracks,
+            inventoryPolicy: policy,
+            availableForSale: sellable,
+            shopifyUpdatedAt: new Date(v.updatedAt),
+            deletedAt: null,
+          },
+          update: {
+            productId: product.id,
+            title: v.title,
+            sku: v.sku,
+            barcode: v.barcode,
+            price: sellable ? new Prisma.Decimal(v.price) : null,
+            compareAtPrice:
+              sellable && v.compareAtPrice
+                ? new Prisma.Decimal(v.compareAtPrice)
+                : null,
+            inventoryQuantity: qty,
+            inventoryItemGid: v.inventoryItem?.id ?? null,
+            tracksInventory: tracks,
+            inventoryPolicy: policy,
+            availableForSale: sellable,
+            shopifyUpdatedAt: new Date(v.updatedAt),
+            deletedAt: null,
+          },
+        });
+      }),
+    );
+
+    await tx.productVariant.updateMany({
+      where: {
+        shopId,
+        productId: product.id,
+        deletedAt: null,
+        shopifyVariantGid: { notIn: seenVariantGids },
+      },
+      data: {
+        deletedAt: new Date(),
+        availableForSale: false,
+        price: null,
+        compareAtPrice: null,
+      },
+    });
   });
 
   return { eligible: mapped.eligible };
@@ -367,6 +367,8 @@ export type RunProductSyncOptions = {
   forcePagination?: boolean;
   /** Accumulated Shopify product GIDs seen across ticks (full reconcile). */
   seenGids?: string[];
+  /** Cached Shopify productsCount from an earlier tick in this job. */
+  knownCount?: number;
 };
 
 /**
@@ -379,14 +381,18 @@ export async function runProductSyncTick(
   const pagesPerTick = options.pagesPerTick ?? PAGES_PER_TICK;
   const tickBudgetMs = options.tickBudgetMs ?? PRODUCT_SYNC_TICK_BUDGET_MS;
   const tickStartedAt = Date.now();
-  let count: number | null = null;
-  try {
-    count = await fetchProductsCount(client, options.shopDomain);
-  } catch (error) {
-    logger.warn("product_sync_count_failed", {
-      shop: options.shopDomain,
-      error: toMerchantSafeError(error, "count_failed"),
-    });
+  // Avoid recounting Shopify on every resume tick — count is stable for a job.
+  let count: number | null =
+    typeof options.knownCount === "number" ? options.knownCount : null;
+  if (count == null && !options.cursor && !options.bulkOperationId) {
+    try {
+      count = await fetchProductsCount(client, options.shopDomain);
+    } catch (error) {
+      logger.warn("product_sync_count_failed", {
+        shop: options.shopDomain,
+        error: toMerchantSafeError(error, "count_failed"),
+      });
+    }
   }
 
   // Resume or start bulk path for large catalogs.
