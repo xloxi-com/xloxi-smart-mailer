@@ -18,6 +18,7 @@ import type { AdminGraphqlClient } from "../shopify/admin-graphql.server";
 import {
   BULK_SYNC_THRESHOLD,
   PAGES_PER_TICK,
+  PRODUCT_SYNC_TICK_BUDGET_MS,
   fetchBulkOperation,
   fetchProductById,
   fetchProductsCount,
@@ -80,8 +81,12 @@ function mapVariantStock(v: ShopifyVariantNode): VariantStockInput {
 export function mapShopifyProductToMirror(
   node: ShopifyProductNode,
   inStockOnly: boolean,
+  options?: { shopDomain?: string | null },
 ) {
-  const publishedToOnlineStore = Boolean(node.onlineStoreUrl);
+  // onlineStoreUrl is null on password-protected storefronts; publishedAt still set.
+  const publishedToOnlineStore = Boolean(
+    node.onlineStoreUrl || node.publishedAt,
+  );
   const variantInputs = node.variants.nodes.map(mapVariantStock);
   const inStock = computeProductInStock(variantInputs);
   const eligible = isProductEligible({
@@ -103,13 +108,18 @@ export function mapShopifyProductToMirror(
   );
   const { min, max } = minMaxAdvertisablePrices(advertPrices);
 
+  const fallbackUrl =
+    !node.onlineStoreUrl && publishedToOnlineStore && options?.shopDomain
+      ? `https://${options.shopDomain.replace(/^https?:\/\//, "")}/products/${node.handle}`
+      : null;
+
   return {
     shopifyProductGid: node.id,
     handle: node.handle,
     title: node.title,
     status: node.status,
     publishedToOnlineStore,
-    storefrontUrl: node.onlineStoreUrl,
+    storefrontUrl: node.onlineStoreUrl ?? fallbackUrl,
     totalInventory: node.totalInventory,
     tracksInventory: node.tracksInventory,
     inStock,
@@ -130,8 +140,9 @@ export async function upsertMirroredProduct(
   shopId: string,
   node: ShopifyProductNode,
   inStockOnly: boolean,
+  options?: { shopDomain?: string | null },
 ): Promise<{ eligible: boolean }> {
-  const mapped = mapShopifyProductToMirror(node, inStockOnly);
+  const mapped = mapShopifyProductToMirror(node, inStockOnly, options);
 
   const product = await prisma.product.upsert({
     where: {
@@ -319,7 +330,9 @@ export async function syncSingleProduct(
       stats.processed = 1;
       return stats;
     }
-    const result = await upsertMirroredProduct(shopId, node, inStockOnly);
+    const result = await upsertMirroredProduct(shopId, node, inStockOnly, {
+      shopDomain,
+    });
     stats.processed = 1;
     stats.upserted = 1;
     stats.eligible = result.eligible ? 1 : 0;
@@ -348,6 +361,8 @@ export type RunProductSyncOptions = {
   /** Optional Shopify search query for incremental sync (e.g. updated_at:>...). */
   shopifyQuery?: string | null;
   pagesPerTick?: number;
+  /** Soft ms budget; tick returns early with hasMore when exceeded. */
+  tickBudgetMs?: number;
   /** Force cursor pagination even for large catalogs (bulk fallback). */
   forcePagination?: boolean;
   /** Accumulated Shopify product GIDs seen across ticks (full reconcile). */
@@ -362,14 +377,25 @@ export async function runProductSyncTick(
   options: RunProductSyncOptions,
 ): Promise<ProductSyncStats> {
   const pagesPerTick = options.pagesPerTick ?? PAGES_PER_TICK;
-  const count = await fetchProductsCount(client, options.shopDomain);
+  const tickBudgetMs = options.tickBudgetMs ?? PRODUCT_SYNC_TICK_BUDGET_MS;
+  const tickStartedAt = Date.now();
+  let count: number | null = null;
+  try {
+    count = await fetchProductsCount(client, options.shopDomain);
+  } catch (error) {
+    logger.warn("product_sync_count_failed", {
+      shop: options.shopDomain,
+      error: toMerchantSafeError(error, "count_failed"),
+    });
+  }
 
   // Resume or start bulk path for large catalogs.
   if (
     !options.forcePagination &&
-    (options.bulkOperationId || count >= BULK_SYNC_THRESHOLD)
+    (options.bulkOperationId ||
+      (count != null && count >= BULK_SYNC_THRESHOLD))
   ) {
-    return runBulkProductSyncTick(client, options, count);
+    return runBulkProductSyncTick(client, options, count ?? 0);
   }
 
   const stats = emptyStats({
@@ -384,6 +410,15 @@ export async function runProductSyncTick(
   const seenGids = [...(options.seenGids ?? [])];
 
   for (let page = 0; page < pagesPerTick && hasNextPage; page++) {
+    // Only stop between pages so cursor always advances (no mid-page stall loop).
+    if (page > 0 && Date.now() - tickStartedAt >= tickBudgetMs) {
+      stats.hasMore = true;
+      stats.phase = "pagination_budget";
+      stats.cursor = cursor;
+      stats.seenGids = seenGids;
+      return stats;
+    }
+
     try {
       const result = await fetchProductsPage(client, options.shopDomain, {
         cursor,
@@ -396,6 +431,7 @@ export async function runProductSyncTick(
             options.shopId,
             node,
             options.inStockOnly,
+            { shopDomain: options.shopDomain },
           );
           stats.processed += 1;
           stats.upserted += 1;
@@ -553,6 +589,7 @@ async function runBulkProductSyncTick(
           options.shopId,
           node,
           options.inStockOnly,
+          { shopDomain: options.shopDomain },
         );
         stats.processed += 1;
         stats.upserted += 1;

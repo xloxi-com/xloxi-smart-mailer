@@ -23,6 +23,7 @@ import {
 } from "../services/admin-products.server";
 import {
   enqueueProductSyncJob,
+  getProductSyncStatus,
   processProductSyncJobTick,
 } from "../jobs/product-sync.server";
 import {
@@ -48,9 +49,29 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     pageSize: 25,
   });
 
-  const excludedCollections = await getExcludedCollections(shopRow.id);
+  const [excludedCollections, syncStatus] = await Promise.all([
+    getExcludedCollections(shopRow.id),
+    getProductSyncStatus(shop),
+  ]);
 
-  return { shop, list, excludedCollections };
+  const latestJob = syncStatus.latestJob;
+  const syncError =
+    latestJob?.status === "FAILED" && latestJob.lastError
+      ? toMerchantSafeError(latestJob.lastError)
+      : null;
+
+  return {
+    shop,
+    list,
+    excludedCollections,
+    syncStatus: {
+      mirroredProducts: syncStatus.mirroredProducts,
+      eligibleProducts: syncStatus.eligibleProducts,
+      lastSyncAt: syncStatus.lastSyncAt,
+      latestJobStatus: latestJob?.status ?? null,
+    },
+    syncError,
+  };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -125,7 +146,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function ProductsPage() {
-  const { list, excludedCollections } = useLoaderData<typeof loader>();
+  const { list, excludedCollections, syncStatus, syncError } =
+    useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const revalidator = useRevalidator();
   const shopify = useAppBridge();
@@ -250,7 +272,19 @@ export default function ProductsPage() {
         </Form>
       </s-section>
 
-      <s-section heading={`Catalog (${list.total})`}>
+      {syncError ? (
+        <s-banner tone="critical" heading="Product sync issue">
+          {syncError} Click Sync products to retry.
+        </s-banner>
+      ) : null}
+
+      <s-section
+        heading={`Catalog (${list.total}${
+          syncStatus.eligibleProducts != null
+            ? ` · ${syncStatus.eligibleProducts} eligible`
+            : ""
+        })`}
+      >
         {selected.length > 0 ? (
           <s-stack direction="inline" gap="base">
             <s-button

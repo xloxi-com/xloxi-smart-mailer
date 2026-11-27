@@ -147,6 +147,21 @@ export async function processProductSyncJobTick(options: {
       : [],
   });
 
+  // A newer Sync products click may have cancelled this job while the tick ran.
+  const stillActive = await prisma.syncJob.findFirst({
+    where: {
+      id: job.id,
+      status: { in: [SyncJobStatus.PENDING, SyncJobStatus.RUNNING] },
+    },
+  });
+  if (!stillActive) {
+    return {
+      job: await prisma.syncJob.findUniqueOrThrow({ where: { id: job.id } }),
+      stats: tickStats,
+      progress: await getCatalogSyncProgress(shop.id),
+    };
+  }
+
   const mergedSeen = [
     ...new Set([
       ...(Array.isArray(prev.seenGids) ? (prev.seenGids as string[]) : []),
@@ -204,8 +219,11 @@ export async function processProductSyncJobTick(options: {
       : [],
   );
 
-  job = await prisma.syncJob.update({
-    where: { id: job.id },
+  const updated = await prisma.syncJob.updateMany({
+    where: {
+      id: job.id,
+      status: { in: [SyncJobStatus.PENDING, SyncJobStatus.RUNNING] },
+    },
     data: {
       status: finalStatus,
       cursor: tickStats.cursor,
@@ -228,6 +246,15 @@ export async function processProductSyncJobTick(options: {
           : null,
     },
   });
+
+  job = await prisma.syncJob.findUniqueOrThrow({ where: { id: job.id } });
+  if (updated.count === 0) {
+    return {
+      job,
+      stats: tickStats,
+      progress: await getCatalogSyncProgress(shop.id),
+    };
+  }
 
   if (done && finalStatus === SyncJobStatus.SUCCEEDED) {
     await prisma.shop.update({

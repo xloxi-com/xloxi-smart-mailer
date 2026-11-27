@@ -19,6 +19,7 @@ const sampleProduct = (overrides?: Partial<ShopifyProductNode>): ShopifyProductN
   totalInventory: 4,
   tracksInventory: true,
   onlineStoreUrl: "https://example.com/products/sync-test-product",
+  publishedAt: "2026-01-01T00:00:00Z",
   updatedAt: "2026-01-01T00:00:00Z",
   featuredImage: { url: "https://cdn.example/p.png" },
   priceRangeV2: {
@@ -68,15 +69,27 @@ describe("product sync integration", () => {
     await prisma.$disconnect();
   });
 
-  it("maps eligibility using onlineStoreUrl and stock rules", () => {
+  it("maps eligibility using onlineStoreUrl/publishedAt and stock rules", () => {
     const mapped = mapShopifyProductToMirror(sampleProduct(), true);
     expect(mapped.publishedToOnlineStore).toBe(true);
     expect(mapped.storefrontUrl).toContain("sync-test-product");
     expect(mapped.eligible).toBe(true);
     expect(mapped.inStock).toBe(true);
 
-    const unpublished = mapShopifyProductToMirror(
+    // Password-protected storefront: URL null, publishedAt still set.
+    const passwordProtected = mapShopifyProductToMirror(
       sampleProduct({ onlineStoreUrl: null }),
+      true,
+      { shopDomain: "example.myshopify.com" },
+    );
+    expect(passwordProtected.publishedToOnlineStore).toBe(true);
+    expect(passwordProtected.eligible).toBe(true);
+    expect(passwordProtected.storefrontUrl).toContain(
+      "example.myshopify.com/products/sync-test-product",
+    );
+
+    const unpublished = mapShopifyProductToMirror(
+      sampleProduct({ onlineStoreUrl: null, publishedAt: null }),
       true,
     );
     expect(unpublished.eligible).toBe(false);

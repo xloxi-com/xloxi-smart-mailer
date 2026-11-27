@@ -5,11 +5,17 @@
 import type { AdminGraphqlClient } from "../shopify/admin-graphql.server";
 import { adminGraphql } from "../shopify/admin-graphql.server";
 
-export const PRODUCT_SYNC_PAGE_SIZE = 50;
+export const PRODUCT_SYNC_PAGE_SIZE = 15;
 /** Catalogs at or above this size use Bulk Operations instead of deep pagination. */
 export const BULK_SYNC_THRESHOLD = 500;
-/** Max GraphQL pages processed per Sync Now / job tick (resumable via cursor). */
-export const PAGES_PER_TICK = 10;
+/**
+ * Max GraphQL pages per Sync Now / job tick (resumable via cursor).
+ * Keep at 1 so each embedded-admin POST stays under proxy/tunnel timeouts
+ * (remote DB upserts of variants are slow).
+ */
+export const PAGES_PER_TICK = 1;
+/** Soft wall-clock budget per tick; leave early with hasMore when exceeded. */
+export const PRODUCT_SYNC_TICK_BUDGET_MS = 20_000;
 
 export type ShopifyMoney = {
   amount: string;
@@ -41,6 +47,8 @@ export type ShopifyProductNode = {
   totalInventory: number;
   tracksInventory: boolean;
   onlineStoreUrl: string | null;
+  /** Set when published to Online Store (works even if storefront password hides URL). */
+  publishedAt: string | null;
   updatedAt: string;
   featuredImage: { url: string } | null;
   priceRangeV2: {
@@ -61,6 +69,7 @@ const PRODUCT_FIELDS = `
   totalInventory
   tracksInventory
   onlineStoreUrl
+  publishedAt
   updatedAt
   featuredImage { url }
   priceRangeV2 {
@@ -181,6 +190,7 @@ export async function startProductsBulkQuery(
           totalInventory
           tracksInventory
           onlineStoreUrl
+          publishedAt
           updatedAt
           featuredImage { url }
           priceRangeV2 {
@@ -297,6 +307,8 @@ export function parseBulkProductsJsonl(jsonl: string): ShopifyProductNode[] {
         tracksInventory: Boolean(row.tracksInventory),
         onlineStoreUrl:
           typeof row.onlineStoreUrl === "string" ? row.onlineStoreUrl : null,
+        publishedAt:
+          typeof row.publishedAt === "string" ? row.publishedAt : null,
         updatedAt: String(row.updatedAt ?? new Date().toISOString()),
         featuredImage:
           row.featuredImage && typeof row.featuredImage === "object"
