@@ -14,10 +14,12 @@ export function reauthorizationResponse(shop?: string): Response {
   const headers = new Headers({
     "X-Shopify-Retry-Invalid-Session-Request": "1",
   });
+  // Point at /app (not /auth) so a completed session never lands on the
+  // auth resource route that previously rendered JSON `null`.
   if (shop) {
     headers.set(
       "X-Shopify-API-Request-Failure-Reauthorize-Url",
-      `/auth?shop=${encodeURIComponent(shop)}`,
+      `/app?shop=${encodeURIComponent(shop)}`,
     );
   }
   return new Response(undefined, {
