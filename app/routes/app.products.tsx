@@ -13,7 +13,10 @@ import {
 } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
-import { requireAdminAuth } from "../shopify/auth.server";
+import {
+  requireAdminAuth,
+  throwReauthorizeIfSessionInvalid,
+} from "../shopify/auth.server";
 import { ensureShop } from "../services/shop.server";
 import {
   getExcludedCollections,
@@ -35,7 +38,7 @@ import {
 import { toMerchantSafeError } from "../lib/safe-error.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { shop } = await requireAdminAuth(request);
+  const { shop, missingScopes } = await requireAdminAuth(request);
   const shopRow = await ensureShop(shop);
   const url = new URL(request.url);
 
@@ -60,6 +63,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       ? toMerchantSafeError(latestJob.lastError)
       : null;
 
+  const apiKey = process.env.SHOPIFY_API_KEY || "";
+  const scopeUpdateUrl = apiKey
+    ? `https://${shop}/admin/oauth/install?client_id=${encodeURIComponent(apiKey)}`
+    : null;
+
   return {
     shop,
     list,
@@ -71,6 +79,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       latestJobStatus: latestJob?.status ?? null,
     },
     syncError,
+    missingScopes,
+    scopeUpdateUrl,
   };
 };
 
@@ -112,6 +122,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           : null,
       };
     } catch (error) {
+      // Stale/revoked offline tokens must re-auth — not a toast.
+      throwReauthorizeIfSessionInvalid(error, shop);
       return {
         ok: false,
         intent,
@@ -146,8 +158,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function ProductsPage() {
-  const { list, excludedCollections, syncStatus, syncError } =
-    useLoaderData<typeof loader>();
+  const {
+    list,
+    excludedCollections,
+    syncStatus,
+    syncError,
+    missingScopes,
+    scopeUpdateUrl,
+  } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const revalidator = useRevalidator();
   const shopify = useAppBridge();
@@ -271,6 +289,20 @@ export default function ProductsPage() {
           </s-stack>
         </Form>
       </s-section>
+
+      {missingScopes.length > 0 ? (
+        <s-banner tone="warning" heading="App permissions need an update">
+          Missing scopes: {missingScopes.join(", ")}. Approve them, then reload.
+          {scopeUpdateUrl ? (
+            <>
+              {" "}
+              <s-link href={scopeUpdateUrl} target="_blank">
+                Update permissions
+              </s-link>
+            </>
+          ) : null}
+        </s-banner>
+      ) : null}
 
       {syncError ? (
         <s-banner tone="critical" heading="Product sync issue">

@@ -7,12 +7,19 @@ import {
 } from "../lib/shop-domain.server";
 import { logger } from "../lib/logging.server";
 import { adminGraphql, type AdminGraphqlOptions } from "./admin-graphql.server";
+import { ShopifySessionInvalidError } from "./errors.server";
+import {
+  reauthorizationResponse,
+  warnIfSessionMissingScopes,
+} from "./reauth.server";
 import { invalidateShopSessions } from "./session.server";
 
 export type AdminAuthContext = {
   shop: string;
   session: Session;
   admin: AdminApiContext;
+  /** Scopes declared by the app but not present on this offline grant. */
+  missingScopes: string[];
   /** Shop-scoped GraphQL helper with retries / throttle handling. */
   graphql: <T = unknown>(
     query: string,
@@ -33,11 +40,16 @@ export async function requireAdminAuth(
 ): Promise<AdminAuthContext> {
   const { admin, session } = await authenticate.admin(request);
   const shop = assertShopMatchesSession(session.shop, options?.expectedShop);
+  const missingScopes = warnIfSessionMissingScopes({
+    shop,
+    scope: session.scope,
+  });
 
   return {
     shop,
     session,
     admin,
+    missingScopes,
     graphql: (query, graphqlOptions) =>
       adminGraphql(admin, query, {
         ...graphqlOptions,
@@ -45,6 +57,25 @@ export async function requireAdminAuth(
         onUnauthorized: invalidateShopSessions,
       }),
   };
+}
+
+/**
+ * Convert API session failures into an App Bridge re-auth response.
+ * Call from route actions/loaders instead of toasting raw REVOKED errors.
+ */
+export function throwReauthorizeIfSessionInvalid(
+  error: unknown,
+  shop?: string,
+): void {
+  if (error instanceof ShopifySessionInvalidError) {
+    throw reauthorizationResponse(shop ?? error.shop);
+  }
+  if (
+    error instanceof Response &&
+    (error.status === 401 || error.status === 302)
+  ) {
+    throw error;
+  }
 }
 
 export type WebhookAuthContext = {

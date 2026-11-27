@@ -10,10 +10,14 @@ import { getFlowDashboardStats } from "../services/admin-flow-dashboard.server";
 import { formatDateTime } from "../utils/admin-format";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { shop } = await requireAdminAuth(request);
+  const { shop, missingScopes } = await requireAdminAuth(request);
   const shopRow = await ensureShop(shop);
   const stats = await getFlowDashboardStats(shopRow.id);
-  return { shop, stats };
+  const apiKey = process.env.SHOPIFY_API_KEY || "";
+  const scopeUpdateUrl = apiKey
+    ? `https://${shop}/admin/oauth/install?client_id=${encodeURIComponent(apiKey)}`
+    : null;
+  return { shop, stats, missingScopes, scopeUpdateUrl };
 };
 
 function StatCard({
@@ -42,7 +46,8 @@ function StatCard({
 }
 
 export default function DashboardPage() {
-  const { shop, stats } = useLoaderData<typeof loader>();
+  const { shop, stats, missingScopes, scopeUpdateUrl } =
+    useLoaderData<typeof loader>();
   const productSyncTone =
     stats.sync.productSync?.status === "FAILED"
       ? "critical"
@@ -55,6 +60,21 @@ export default function DashboardPage() {
       <s-button slot="primary-action" href="/app/flow" variant="primary">
         Flow integration
       </s-button>
+
+      {missingScopes.length > 0 ? (
+        <s-banner tone="warning" heading="App permissions need an update">
+          Missing scopes: {missingScopes.join(", ")}. Open the install link to
+          approve them, then reload this app.
+          {scopeUpdateUrl ? (
+            <>
+              {" "}
+              <s-link href={scopeUpdateUrl} target="_blank">
+                Update permissions
+              </s-link>
+            </>
+          ) : null}
+        </s-banner>
+      ) : null}
 
       <s-section heading="Overview">
         <s-paragraph>
