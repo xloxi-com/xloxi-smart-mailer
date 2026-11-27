@@ -63,11 +63,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       ? toMerchantSafeError(latestJob.lastError)
       : null;
 
-  const apiKey = process.env.SHOPIFY_API_KEY || "";
-  const scopeUpdateUrl = apiKey
-    ? `https://${shop}/admin/oauth/install?client_id=${encodeURIComponent(apiKey)}`
-    : null;
-
   return {
     shop,
     list,
@@ -80,7 +75,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     },
     syncError,
     missingScopes,
-    scopeUpdateUrl,
   };
 };
 
@@ -158,14 +152,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function ProductsPage() {
-  const {
-    list,
-    excludedCollections,
-    syncStatus,
-    syncError,
-    missingScopes,
-    scopeUpdateUrl,
-  } = useLoaderData<typeof loader>();
+  const { list, excludedCollections, syncStatus, syncError, missingScopes } =
+    useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const revalidator = useRevalidator();
   const shopify = useAppBridge();
@@ -292,15 +280,8 @@ export default function ProductsPage() {
 
       {missingScopes.length > 0 ? (
         <s-banner tone="warning" heading="App permissions need an update">
-          Missing scopes: {missingScopes.join(", ")}. Approve them, then reload.
-          {scopeUpdateUrl ? (
-            <>
-              {" "}
-              <s-link href={scopeUpdateUrl} target="_blank">
-                Update permissions
-              </s-link>
-            </>
-          ) : null}
+          Missing scopes: {missingScopes.join(", ")}. Close this app and open it
+          again from Apps — Shopify will ask you to approve the new permissions.
         </s-banner>
       ) : null}
 

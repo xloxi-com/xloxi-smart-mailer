@@ -29,12 +29,19 @@ export function reauthorizationResponse(shop?: string): Response {
 
 export function parseGrantedScopes(scope: string | undefined | null): Set<string> {
   if (!scope) return new Set();
-  return new Set(
+  const granted = new Set(
     scope
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean),
   );
+  // Shopify: a write_* grant includes the matching read_* permission.
+  for (const handle of [...granted]) {
+    if (handle.startsWith("write_")) {
+      granted.add(`read_${handle.slice("write_".length)}`);
+    }
+  }
+  return granted;
 }
 
 export function getMissingRequiredScopes(
@@ -42,6 +49,34 @@ export function getMissingRequiredScopes(
 ): string[] {
   const granted = parseGrantedScopes(scope);
   return REQUIRED_SCOPES.filter((s) => !granted.has(s));
+}
+
+/** Store handle for admin.shopify.com/store/{handle}/... URLs. */
+export function shopHandleFromDomain(shopDomain: string): string {
+  return shopDomain.replace(/\.myshopify\.com$/i, "").trim();
+}
+
+/**
+ * Correct install / scope-update URL (never use https://{shop}.myshopify.com/... —
+ * that endpoint returns null).
+ */
+export function buildScopeUpdateUrl(options: {
+  shopDomain: string;
+  clientId: string;
+  optionalScopes?: string[];
+}): string | null {
+  const clientId = options.clientId.trim();
+  if (!clientId) return null;
+  const handle = shopHandleFromDomain(options.shopDomain);
+  if (!handle) return null;
+  const url = new URL(
+    `https://admin.shopify.com/store/${encodeURIComponent(handle)}/oauth/install`,
+  );
+  url.searchParams.set("client_id", clientId);
+  if (options.optionalScopes && options.optionalScopes.length > 0) {
+    url.searchParams.set("optional_scopes", options.optionalScopes.join(","));
+  }
+  return url.toString();
 }
 
 /**

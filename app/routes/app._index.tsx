@@ -13,11 +13,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { shop, missingScopes } = await requireAdminAuth(request);
   const shopRow = await ensureShop(shop);
   const stats = await getFlowDashboardStats(shopRow.id);
-  const apiKey = process.env.SHOPIFY_API_KEY || "";
-  const scopeUpdateUrl = apiKey
-    ? `https://${shop}/admin/oauth/install?client_id=${encodeURIComponent(apiKey)}`
-    : null;
-  return { shop, stats, missingScopes, scopeUpdateUrl };
+  return { shop, stats, missingScopes };
 };
 
 function StatCard({
@@ -46,8 +42,7 @@ function StatCard({
 }
 
 export default function DashboardPage() {
-  const { shop, stats, missingScopes, scopeUpdateUrl } =
-    useLoaderData<typeof loader>();
+  const { shop, stats, missingScopes } = useLoaderData<typeof loader>();
   const productSyncTone =
     stats.sync.productSync?.status === "FAILED"
       ? "critical"
@@ -63,16 +58,8 @@ export default function DashboardPage() {
 
       {missingScopes.length > 0 ? (
         <s-banner tone="warning" heading="App permissions need an update">
-          Missing scopes: {missingScopes.join(", ")}. Open the install link to
-          approve them, then reload this app.
-          {scopeUpdateUrl ? (
-            <>
-              {" "}
-              <s-link href={scopeUpdateUrl} target="_blank">
-                Update permissions
-              </s-link>
-            </>
-          ) : null}
+          Missing scopes: {missingScopes.join(", ")}. Close this app and open it
+          again from Apps — Shopify will ask you to approve the new permissions.
         </s-banner>
       ) : null}
 
