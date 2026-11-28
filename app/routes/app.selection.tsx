@@ -29,7 +29,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     shop,
     subscribers,
     defaults: {
-      productsPerEmail: shopRow.automationSettings?.productsPerEmail ?? 6,
+      productsPerEmail: shopRow.automationSettings?.productsPerEmail ?? 4,
       inStockOnly: shopRow.automationSettings?.inStockOnly !== false,
       intervalDays: shopRow.automationSettings?.intervalDays ?? 3,
     },
@@ -42,7 +42,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const form = await request.formData();
   const intent = String(form.get("intent") ?? "");
   const subscriberId = String(form.get("subscriberId") ?? "");
-  const batchSize = Number(form.get("batchSize") ?? 6);
+  const batchSize = Number(form.get("batchSize") ?? 4);
 
   if (!subscriberId) {
     return { ok: false, intent, error: "Select a test customer" };
@@ -97,8 +97,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         return {
           ok: false,
           intent,
-          error: "Could not reserve a test batch",
-          detail: result.reserved.status,
+          error: "Could not prepare a single-customer Flow test batch",
+          detail:
+            result.flow.status === "skipped" || result.flow.status === "failed"
+              ? result.flow.reason
+              : result.flow.status,
         };
       }
       return {
@@ -108,10 +111,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         batchId:
           result.flow.status === "ready" || result.flow.status === "acknowledged"
             ? result.flow.batchId
-            : result.reserved.status === "reserved" ||
-                result.reserved.status === "active_job_exists"
-              ? result.reserved.job.id
-              : null,
+            : null,
       };
     }
   } catch (error) {
@@ -160,10 +160,10 @@ export default function RandomSelectionPage() {
     <s-page heading="Random Selection">
       <s-section heading="Test selection">
         <s-paragraph>
-          Preview random products for one subscribed customer. Preparing a test
-          batch writes Shopify tags/metafields — it does not send email from
-          this app. Live Messaging still requires your Flow Workflow B and
-          explicit approval before real sends.
+          Safe single-customer test: preview or prepare one subscribed customer
+          only (no bulk tags). Preparing writes Shopify tags/metafields for Flow
+          — this app never sends email. Messaging still requires Workflow B.
+          Product history is preserved.
         </s-paragraph>
         <s-stack direction="block" gap="base">
           <s-select

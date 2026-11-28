@@ -169,7 +169,8 @@ model AutomationSettings {
   shopId             String   @unique
   automationEnabled  Boolean  @default(false)
   intervalDays       Int      @default(3)
-  productsPerEmail   Int      @default(6)
+  /// Default 4 in-stock products per Messaging email (Mon/Thu cadence).
+  productsPerEmail   Int      @default(4)
   randomSelection    Boolean  @default(true)
   inStockOnly        Boolean  @default(true)
   preventDuplicates  Boolean  @default(true)

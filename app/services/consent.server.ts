@@ -79,16 +79,22 @@ export function maskEmail(email: string): string {
   return `${visible}***@${domain}`;
 }
 
+/** Monday + Thursday (UTC getUTCDay): two sends per week without drift. */
+export const SCHEDULE_WEEKDAYS_UTC = [1, 4] as const;
+export const SCHEDULE_HOUR_UTC = 14;
+
 /**
  * Stable stagger offset in minutes so initial sends are not simultaneous.
- * Spread across the cadence window (intervalDays).
+ * Kept within a few hours on the send day (not multi-day) so new subscribers
+ * are not blocked for days before their first Flow request can run.
  */
 export function computeStaggerMinutes(
   shopId: string,
   shopifyCustomerGid: string,
   intervalDays: number,
 ): number {
-  const windowMinutes = Math.max(intervalDays, 1) * 24 * 60;
+  // Cap to 4h regardless of intervalDays — Mon/Thu slots own the cadence.
+  const windowMinutes = Math.min(4 * 60, Math.max(intervalDays, 1) * 24 * 60);
   let hash = 0;
   const key = `${shopId}:${shopifyCustomerGid}`;
   for (let i = 0; i < key.length; i++) {
@@ -98,7 +104,48 @@ export function computeStaggerMinutes(
 }
 
 /**
- * Independent next-email schedule for a subscriber (UTC).
+ * Next Mon/Thu slot after `after` (UTC).
+ * When skipSameUtcDay is true (post-send), never lands on the same UTC day.
+ */
+export function nextScheduledSlot(options: {
+  after: Date;
+  weekdays?: readonly number[];
+  hourUtc?: number;
+  minuteUtc?: number;
+  skipSameUtcDay?: boolean;
+}): Date {
+  const weekdays = options.weekdays ?? SCHEDULE_WEEKDAYS_UTC;
+  const hourUtc = options.hourUtc ?? SCHEDULE_HOUR_UTC;
+  const minuteUtc = options.minuteUtc ?? 0;
+  const after = options.after;
+  const startDayOffset = options.skipSameUtcDay ? 1 : 0;
+
+  for (let dayOffset = startDayOffset; dayOffset <= 14; dayOffset++) {
+    const candidate = new Date(
+      Date.UTC(
+        after.getUTCFullYear(),
+        after.getUTCMonth(),
+        after.getUTCDate() + dayOffset,
+        hourUtc,
+        minuteUtc,
+        0,
+        0,
+      ),
+    );
+    if (
+      weekdays.includes(candidate.getUTCDay()) &&
+      candidate.getTime() > after.getTime()
+    ) {
+      return candidate;
+    }
+  }
+
+  return new Date(after.getTime() + 3 * 24 * 60 * 60 * 1000);
+}
+
+/**
+ * Independent next-email schedule for a subscriber (UTC Mon/Thu).
+ * intervalDays is retained for stagger window sizing / settings UI only.
  */
 export function calculateNextEmailAt(options: {
   shopId: string;
@@ -110,25 +157,28 @@ export function calculateNextEmailAt(options: {
   staggerInitial?: boolean;
 }): Date {
   const now = options.now ?? new Date();
-  const intervalMs = Math.max(options.intervalDays, 1) * 24 * 60 * 60 * 1000;
 
   if (options.lastSuccessfulEmailAt) {
-    return new Date(options.lastSuccessfulEmailAt.getTime() + intervalMs);
+    return nextScheduledSlot({
+      after: options.lastSuccessfulEmailAt,
+      skipSameUtcDay: true,
+    });
   }
 
-  if (options.staggerInitial !== false) {
-    const staggerMs =
-      computeStaggerMinutes(
-        options.shopId,
-        options.shopifyCustomerGid,
-        options.intervalDays,
-      ) *
-      60 *
-      1000;
-    return new Date(now.getTime() + staggerMs);
-  }
+  const staggerMinutes =
+    options.staggerInitial !== false
+      ? computeStaggerMinutes(
+          options.shopId,
+          options.shopifyCustomerGid,
+          options.intervalDays,
+        )
+      : 0;
 
-  return new Date(now.getTime() + intervalMs);
+  return nextScheduledSlot({
+    after: now,
+    minuteUtc: staggerMinutes,
+    skipSameUtcDay: false,
+  });
 }
 
 export type LiveConsentResult =

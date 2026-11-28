@@ -17,7 +17,7 @@ import type { Prisma } from "@prisma/client";
 import { Prisma as PrismaSql } from "../lib/prisma.server";
 import { getPreviousAcceptedEmailProductIds } from "./product-history.server";
 
-export const DEFAULT_BATCH_SIZE = 6;
+export const DEFAULT_BATCH_SIZE = 4;
 
 type Tx = Prisma.TransactionClient;
 

@@ -150,7 +150,7 @@ export async function getFlowDashboardStats(shopId: string) {
       appSchedulerEnabled:
         shop.automationSettings?.appSchedulerEnabled ?? false,
       intervalDays: shop.automationSettings?.intervalDays ?? 3,
-      productsPerEmail: shop.automationSettings?.productsPerEmail ?? 6,
+      productsPerEmail: shop.automationSettings?.productsPerEmail ?? 4,
       inStockOnly: shop.automationSettings?.inStockOnly ?? true,
       integration:
         shop.automationSettings?.emailProviderLabel ?? "shopify_messaging",

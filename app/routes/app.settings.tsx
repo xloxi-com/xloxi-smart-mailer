@@ -26,7 +26,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       enabled: shopRow.automationSettings?.automationEnabled ?? false,
       testMode: shopRow.automationSettings?.testMode ?? true,
       intervalDays: shopRow.automationSettings?.intervalDays ?? 3,
-      productsPerEmail: shopRow.automationSettings?.productsPerEmail ?? 6,
+      productsPerEmail: shopRow.automationSettings?.productsPerEmail ?? 4,
       inStockOnly: shopRow.automationSettings?.inStockOnly !== false,
       appSchedulerEnabled:
         shopRow.automationSettings?.appSchedulerEnabled ?? false,

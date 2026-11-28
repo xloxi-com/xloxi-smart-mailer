@@ -266,16 +266,33 @@ export async function upsertSubscriberFromShopify(options: {
   const becameEligible =
     eligible && (!existing || !existing.eligible || existing.deletedAt);
 
+  /**
+   * Preserve nextEmailAt on routine syncs.
+   * Only assign a first Mon/Thu slot for brand-new mirrors or newly eligible
+   * never-sent subscribers. Do NOT recompute when nextEmailAt is null (due now)
+   * — that previously stamped a future stagger on every customers/update and
+   * blocked Flow xloxi-request processing.
+   */
   let nextEmailAt = existing?.nextEmailAt ?? null;
   if (eligible) {
-    if (!nextEmailAt || becameEligible) {
+    if (!existing) {
       nextEmailAt = calculateNextEmailAt({
         shopId: options.shopId,
         shopifyCustomerGid: options.node.id,
         intervalDays: options.intervalDays,
-        lastSuccessfulEmailAt: existing?.lastSuccessfulEmailAt,
-        staggerInitial: !existing?.lastSuccessfulEmailAt,
+        staggerInitial: true,
       });
+    } else if (becameEligible && !existing.lastSuccessfulEmailAt) {
+      nextEmailAt =
+        existing.nextEmailAt ??
+        calculateNextEmailAt({
+          shopId: options.shopId,
+          shopifyCustomerGid: options.node.id,
+          intervalDays: options.intervalDays,
+          staggerInitial: true,
+        });
+    } else {
+      nextEmailAt = existing.nextEmailAt;
     }
   } else {
     nextEmailAt = null;

@@ -75,22 +75,35 @@ describe("consent helpers", () => {
     ).toBe(false);
   });
 
-  it("staggers next email dates independently", () => {
+  it("staggers first-send within a few hours, not multi-day", () => {
     const a = computeStaggerMinutes("shop1", "gid://shopify/Customer/1", 3);
     const b = computeStaggerMinutes("shop1", "gid://shopify/Customer/2", 3);
     expect(a).toBeGreaterThanOrEqual(0);
-    expect(a).toBeLessThan(3 * 24 * 60);
-    // Different customers should usually differ (not guaranteed but likely)
+    expect(a).toBeLessThan(4 * 60);
     expect(typeof b).toBe("number");
+  });
 
+  it("schedules next send on Monday/Thursday after a completed send", () => {
+    // 2026-01-01 is Thursday → next slot is Monday 2026-01-05 14:00 UTC
     const next = calculateNextEmailAt({
       shopId: "shop1",
       shopifyCustomerGid: "gid://shopify/Customer/1",
       intervalDays: 3,
-      lastSuccessfulEmailAt: new Date("2026-01-01T00:00:00.000Z"),
-      now: new Date("2026-01-01T00:00:00.000Z"),
+      lastSuccessfulEmailAt: new Date("2026-01-01T15:00:00.000Z"),
+      now: new Date("2026-01-01T15:00:00.000Z"),
     });
-    expect(next.toISOString()).toBe("2026-01-04T00:00:00.000Z");
+    expect(next.toISOString()).toBe("2026-01-05T14:00:00.000Z");
+    expect(next.getUTCDay()).toBe(1);
+
+    // After Monday → next is Thursday
+    const afterMon = calculateNextEmailAt({
+      shopId: "shop1",
+      shopifyCustomerGid: "gid://shopify/Customer/1",
+      intervalDays: 3,
+      lastSuccessfulEmailAt: new Date("2026-01-05T14:00:00.000Z"),
+    });
+    expect(afterMon.toISOString()).toBe("2026-01-08T14:00:00.000Z");
+    expect(afterMon.getUTCDay()).toBe(4);
   });
 
   it("parses consent states", () => {

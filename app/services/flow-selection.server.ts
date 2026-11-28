@@ -3,7 +3,7 @@
  *
  * Lifecycle:
  * 1. Detect xloxi-request on customers/update webhook
- * 2. Verify consent + next eligible date
+ * 2. Verify consent (+ next-due gate only after a completed send)
  * 3. Reserve unique batch (EmailJob) — no duplicate pending batches
  * 4. Commit product history (prevents reselection)
  * 5. Remove previous completed XLOXI selection tags only
@@ -44,6 +44,18 @@ function isSubscribed(marketingState: string | null | undefined): boolean {
   return (marketingState ?? "").toUpperCase() === "SUBSCRIBED";
 }
 
+async function removeRequestTag(
+  client: AdminGraphqlClient,
+  shopDomain: string,
+  customerGid: string,
+): Promise<void> {
+  try {
+    await tagsRemove(client, shopDomain, customerGid, [XLOXI_TAG_REQUEST]);
+  } catch {
+    /* ignore */
+  }
+}
+
 /**
  * Process a customer update for Flow request / acknowledgement.
  * Guarded against recursion: ignores events that only contain our write-back tags
@@ -59,6 +71,8 @@ export async function processCustomerFlowUpdate(options: {
   inStockOnly: boolean;
   automationEnabled: boolean;
   testMode: boolean;
+  /** Bypass nextEmailAt even after a completed send (safe single-customer test). */
+  forceProcess?: boolean;
 }): Promise<FlowSelectionResult> {
   const snapshot = await fetchCustomerFlowSnapshot(
     options.client,
@@ -66,6 +80,11 @@ export async function processCustomerFlowUpdate(options: {
     options.customerGid,
   );
   if (!snapshot) {
+    logger.info("flow_selection_skip", {
+      shop: options.shopDomain,
+      customerGid: options.customerGid,
+      reason: "customer_not_found",
+    });
     return { status: "skipped", reason: "customer_not_found" };
   }
 
@@ -78,6 +97,11 @@ export async function processCustomerFlowUpdate(options: {
     },
   });
   if (!subscriber || subscriber.deletedAt) {
+    logger.info("flow_selection_skip", {
+      shop: options.shopDomain,
+      customerGid: options.customerGid,
+      reason: "subscriber_not_mirrored",
+    });
     return { status: "skipped", reason: "subscriber_not_mirrored" };
   }
 
@@ -87,30 +111,33 @@ export async function processCustomerFlowUpdate(options: {
     const matchesPending =
       subscriber.pendingBatchId != null &&
       processedId === subscriber.pendingBatchId;
-    const readyJob = await prisma.emailJob.findFirst({
+    const ackableJob = await prisma.emailJob.findFirst({
       where: {
         id: processedId,
         shopId: options.shopId,
         subscriberId: subscriber.id,
-        flowStatus: {
-          in: [FlowBatchStatus.READY, FlowBatchStatus.PENDING],
-        },
       },
-      select: { id: true },
+      select: { id: true, flowStatus: true },
     });
 
-    if (matchesPending || readyJob) {
+    if (matchesPending || ackableJob) {
       const ack = await acknowledgeFlowBatch({
         shopId: options.shopId,
         subscriberId: subscriber.id,
         batchId: processedId,
         intervalDays: options.intervalDays,
+        client: options.client,
+        shopDomain: options.shopDomain,
+        customerGid: options.customerGid,
       });
       if (ack.status === "acknowledged") {
-        return ack;
+        // Continue only if a fresh request tag is also present.
+        if (!hasRequestTag(snapshot.tags)) {
+          return ack;
+        }
       }
     } else {
-      // Ambiguous processed id — mirror only; do not auto-retry.
+      // Unknown processed id — mirror only; do not auto-retry.
       await prisma.subscriber.update({
         where: { id: subscriber.id },
         data: {
@@ -120,6 +147,11 @@ export async function processCustomerFlowUpdate(options: {
             : new Date(),
         },
       });
+      logger.warn("flow_ack_unknown_batch", {
+        shop: options.shopDomain,
+        customerGid: options.customerGid,
+        processedId,
+      });
     }
   }
 
@@ -127,23 +159,26 @@ export async function processCustomerFlowUpdate(options: {
     return { status: "skipped", reason: "no_request_tag" };
   }
 
+  // Refresh subscriber after possible ack updates.
+  const current = await prisma.subscriber.findUniqueOrThrow({
+    where: { id: subscriber.id },
+  });
+
   // Recursion guard: already ready with pending batch matching metafield.
   if (
     hasReadyTag(snapshot.tags) &&
     snapshot.metafields.pendingBatchId &&
-    subscriber.pendingBatchId === snapshot.metafields.pendingBatchId
+    current.pendingBatchId === snapshot.metafields.pendingBatchId
   ) {
-    // Still remove request if Flow left it on.
-    try {
-      await tagsRemove(
-        options.client,
-        options.shopDomain,
-        options.customerGid,
-        [XLOXI_TAG_REQUEST],
-      );
-    } catch {
-      /* ignore */
-    }
+    await removeRequestTag(
+      options.client,
+      options.shopDomain,
+      options.customerGid,
+    );
+    logger.info("flow_selection_reuse_ready", {
+      shop: options.shopDomain,
+      batchId: snapshot.metafields.pendingBatchId,
+    });
     return {
       status: "ready",
       batchId: snapshot.metafields.pendingBatchId,
@@ -152,50 +187,79 @@ export async function processCustomerFlowUpdate(options: {
     };
   }
 
-  if (!options.automationEnabled && !options.testMode) {
+  if (!options.automationEnabled && !options.testMode && !options.forceProcess) {
+    logger.info("flow_selection_skip", {
+      shop: options.shopDomain,
+      reason: "automation_disabled",
+    });
     return { status: "skipped", reason: "automation_disabled" };
   }
 
   if (!isSubscribed(snapshot.marketingState)) {
-    await tagsRemove(
+    await removeRequestTag(
       options.client,
       options.shopDomain,
       options.customerGid,
-      [XLOXI_TAG_REQUEST],
-    ).catch(() => undefined);
+    );
     return { status: "skipped", reason: "consent_not_subscribed" };
   }
 
-  if (subscriber.marketingConsentState !== MarketingConsentState.SUBSCRIBED) {
+  if (current.marketingConsentState !== MarketingConsentState.SUBSCRIBED) {
     return { status: "skipped", reason: "mirror_consent_not_subscribed" };
   }
 
-  if (subscriber.isSuppressed || subscriber.paused || !subscriber.eligible) {
-    await tagsRemove(
+  if (current.isSuppressed || current.paused || !current.eligible) {
+    await removeRequestTag(
       options.client,
       options.shopDomain,
       options.customerGid,
-      [XLOXI_TAG_REQUEST],
-    ).catch(() => undefined);
+    );
     return { status: "skipped", reason: "subscriber_ineligible" };
   }
 
   const now = new Date();
-  if (subscriber.nextEmailAt && subscriber.nextEmailAt > now) {
-    await tagsRemove(
+  const notDue = current.nextEmailAt != null && current.nextEmailAt > now;
+  const hasCompletedSend = current.lastSuccessfulEmailAt != null;
+  /**
+   * xloxi-request is the Flow/scheduler due signal.
+   * Only enforce nextEmailAt after a completed send (prevents same-week doubles).
+   * Never-sent subscribers (staggered nextEmailAt) must still process when tagged.
+   * forceProcess (single-customer admin test) may bypass; testMode alone must not
+   * create duplicate batches after acknowledgement.
+   */
+  if (notDue && hasCompletedSend && !options.forceProcess) {
+    await removeRequestTag(
       options.client,
       options.shopDomain,
       options.customerGid,
-      [XLOXI_TAG_REQUEST],
-    ).catch(() => undefined);
+    );
+    logger.info("flow_selection_skip", {
+      shop: options.shopDomain,
+      customerGid: options.customerGid,
+      reason: "next_selection_not_due",
+      nextEmailAt: current.nextEmailAt?.toISOString() ?? null,
+    });
     return { status: "skipped", reason: "next_selection_not_due" };
   }
 
-  const idempotencyKey = `flow:${subscriber.id}:${subscriber.nextEmailAt?.toISOString() ?? "immediate"}:${Date.now()}`;
+  if (notDue && (!hasCompletedSend || options.forceProcess)) {
+    logger.info("flow_selection_due_bypass", {
+      shop: options.shopDomain,
+      customerGid: options.customerGid,
+      forceProcess: Boolean(options.forceProcess),
+      neverSent: !hasCompletedSend,
+      nextEmailAt: current.nextEmailAt?.toISOString() ?? null,
+    });
+  }
+
+  const slotKey =
+    current.nextEmailAt?.toISOString() ??
+    (hasCompletedSend ? "retry" : "first");
+  const idempotencyKey = `flow:${current.id}:${slotKey}`;
 
   const reserved = await reserveEmailBatch({
     shopId: options.shopId,
-    subscriberId: subscriber.id,
+    subscriberId: current.id,
     idempotencyKey,
     batchSize: options.productsPerEmail,
     dryRun: true,
@@ -207,12 +271,11 @@ export async function processCustomerFlowUpdate(options: {
     return { status: "skipped", reason: reserved.reason };
   }
   if (reserved.status === "skipped_no_products") {
-    await tagsRemove(
+    await removeRequestTag(
       options.client,
       options.shopDomain,
       options.customerGid,
-      [XLOXI_TAG_REQUEST],
-    ).catch(() => undefined);
+    );
     return { status: "skipped", reason: "no_eligible_products" };
   }
 
@@ -227,12 +290,11 @@ export async function processCustomerFlowUpdate(options: {
     job.flowStatus === FlowBatchStatus.READY ||
     job.flowStatus === FlowBatchStatus.ACKNOWLEDGED
   ) {
-    await tagsRemove(
+    await removeRequestTag(
       options.client,
       options.shopDomain,
       options.customerGid,
-      [XLOXI_TAG_REQUEST],
-    ).catch(() => undefined);
+    );
     return {
       status: "ready",
       batchId: job.id,
@@ -245,7 +307,7 @@ export async function processCustomerFlowUpdate(options: {
     await prisma.$transaction(async (tx) => {
       await commitProductHistoryAfterAcceptance(tx, {
         shopId: options.shopId,
-        subscriberId: subscriber.id,
+        subscriberId: current.id,
         cycleNumber: job.cycleNumber,
         emailJobId: job.id,
         productIds: job.products.map((p) => p.productId),
@@ -262,7 +324,7 @@ export async function processCustomerFlowUpdate(options: {
       });
 
       await tx.subscriber.update({
-        where: { id: subscriber.id },
+        where: { id: current.id },
         data: { pendingBatchId: job.id },
       });
     });
@@ -326,11 +388,10 @@ export async function processCustomerFlowUpdate(options: {
       options.customerGid,
       [XLOXI_TAG_READY],
     );
-    await tagsRemove(
+    await removeRequestTag(
       options.client,
       options.shopDomain,
       options.customerGid,
-      [XLOXI_TAG_REQUEST],
     );
 
     await prisma.emailJob.update({
@@ -341,10 +402,22 @@ export async function processCustomerFlowUpdate(options: {
       },
     });
 
+    // Advance local schedule when the batch is ready so the app scheduler
+    // does not re-tag while Flow Messaging / ack is in flight.
+    await prisma.subscriber.update({
+      where: { id: current.id },
+      data: {
+        pendingBatchId: job.id,
+        nextEmailAt: nextAt,
+      },
+    });
+
     logger.info("flow_selection_ready", {
       shop: options.shopDomain,
       batchId: job.id,
       products: handles.length,
+      nextEmailAt: nextAt.toISOString(),
+      reused,
     });
 
     return {
@@ -366,9 +439,11 @@ export async function processCustomerFlowUpdate(options: {
         completedAt: new Date(),
       },
     });
+    // Leave xloxi-request for a safe retry on the next customers/update.
     logger.error("flow_selection_failed", {
       shop: options.shopDomain,
       batchId: job.id,
+      reason,
     });
     return { status: "failed", reason: "flow_selection_failed" };
   }
@@ -379,6 +454,9 @@ export async function acknowledgeFlowBatch(options: {
   subscriberId: string;
   batchId: string;
   intervalDays: number;
+  client?: AdminGraphqlClient;
+  shopDomain?: string;
+  customerGid?: string;
 }): Promise<FlowSelectionResult> {
   const job = await prisma.emailJob.findFirst({
     where: {
@@ -390,14 +468,42 @@ export async function acknowledgeFlowBatch(options: {
   if (!job) {
     return { status: "skipped", reason: "batch_not_found" };
   }
-  if (job.flowStatus === FlowBatchStatus.ACKNOWLEDGED) {
-    return { status: "acknowledged", batchId: job.id };
-  }
+
+  const subscriber = await prisma.subscriber.findUniqueOrThrow({
+    where: { id: options.subscriberId },
+  });
 
   const now = new Date();
-  const nextAt = new Date(
-    now.getTime() + options.intervalDays * 24 * 60 * 60 * 1000,
-  );
+  const ackAt = job.acknowledgedAt ?? now;
+  const nextAt = calculateNextEmailAt({
+    shopId: options.shopId,
+    shopifyCustomerGid: subscriber.shopifyCustomerGid,
+    intervalDays: options.intervalDays,
+    lastSuccessfulEmailAt: ackAt,
+    staggerInitial: false,
+  });
+
+  if (job.flowStatus === FlowBatchStatus.ACKNOWLEDGED) {
+    // Repair subscriber mirror if Flow ack landed but local fields lagged.
+    await prisma.subscriber.update({
+      where: { id: options.subscriberId },
+      data: {
+        processedBatchId: job.id,
+        pendingBatchId: null,
+        lastProcessedAt: subscriber.lastProcessedAt ?? ackAt,
+        lastSuccessfulEmailAt: subscriber.lastSuccessfulEmailAt ?? ackAt,
+        nextEmailAt:
+          subscriber.nextEmailAt && subscriber.nextEmailAt > now
+            ? subscriber.nextEmailAt
+            : nextAt,
+      },
+    });
+    logger.info("flow_batch_ack_repair", {
+      shopId: options.shopId,
+      batchId: job.id,
+    });
+    return { status: "acknowledged", batchId: job.id };
+  }
 
   await prisma.$transaction([
     prisma.emailJob.update({
@@ -422,10 +528,39 @@ export async function acknowledgeFlowBatch(options: {
     }),
   ]);
 
+  if (options.client && options.shopDomain && options.customerGid) {
+    try {
+      await setCustomerXloxiMetafields(
+        options.client,
+        options.shopDomain,
+        options.customerGid,
+        [
+          {
+            key: XLOXI_METAFIELD_KEYS.lastProcessedAt,
+            type: "date_time",
+            value: now.toISOString(),
+          },
+          {
+            key: XLOXI_METAFIELD_KEYS.nextSelectionAt,
+            type: "date_time",
+            value: nextAt.toISOString(),
+          },
+        ],
+      );
+    } catch (error) {
+      logger.warn("flow_ack_metafield_sync_failed", {
+        shop: options.shopDomain,
+        batchId: job.id,
+        name: error instanceof Error ? error.name : "unknown",
+      });
+    }
+  }
+
   // Note: acknowledgement ≠ confirmed email delivery.
   logger.info("flow_batch_acknowledged", {
     shopId: options.shopId,
     batchId: job.id,
+    nextEmailAt: nextAt.toISOString(),
   });
 
   return { status: "acknowledged", batchId: job.id };
@@ -470,9 +605,74 @@ export async function tagDueSubscribersWithRequest(options: {
         [XLOXI_TAG_REQUEST],
       );
       tagged += 1;
+      logger.info("flow_scheduler_tagged_request", {
+        shop: options.shopDomain,
+        subscriberId: sub.id,
+      });
     } catch {
       skipped += 1;
     }
   }
   return { tagged, skipped };
+}
+
+/**
+ * Safe single-customer Flow test: tags one subscriber with xloxi-request and
+ * runs selection. Does not bulk-tag, does not toggle shop automation, and does
+ * not reset product history.
+ */
+export async function runSafeSingleCustomerFlowTest(options: {
+  client: AdminGraphqlClient;
+  shopDomain: string;
+  shopId: string;
+  subscriberId: string;
+  productsPerEmail?: number;
+  inStockOnly?: boolean;
+  intervalDays?: number;
+}): Promise<{
+  ok: boolean;
+  flow: FlowSelectionResult;
+  customerGid: string;
+}> {
+  const subscriber = await prisma.subscriber.findFirstOrThrow({
+    where: { id: options.subscriberId, shopId: options.shopId },
+  });
+
+  logger.info("flow_single_customer_test_start", {
+    shop: options.shopDomain,
+    subscriberId: subscriber.id,
+    customerGid: subscriber.shopifyCustomerGid,
+  });
+
+  await tagsAdd(
+    options.client,
+    options.shopDomain,
+    subscriber.shopifyCustomerGid,
+    [XLOXI_TAG_REQUEST],
+  );
+
+  const flow = await processCustomerFlowUpdate({
+    client: options.client,
+    shopDomain: options.shopDomain,
+    shopId: options.shopId,
+    customerGid: subscriber.shopifyCustomerGid,
+    intervalDays: options.intervalDays ?? 3,
+    productsPerEmail: options.productsPerEmail ?? 4,
+    inStockOnly: options.inStockOnly !== false,
+    automationEnabled: false,
+    testMode: true,
+    forceProcess: true,
+  });
+
+  logger.info("flow_single_customer_test_done", {
+    shop: options.shopDomain,
+    subscriberId: subscriber.id,
+    status: flow.status,
+  });
+
+  return {
+    ok: flow.status === "ready" || flow.status === "acknowledged",
+    flow,
+    customerGid: subscriber.shopifyCustomerGid,
+  };
 }

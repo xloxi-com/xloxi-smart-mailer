@@ -293,6 +293,7 @@ export default function SubscribersPage() {
                   </s-text>
                   <s-text color="subdued">
                     Last email: {formatDateTime(row.lastSuccessfulEmailAt)} ·
+                    Last processed: {formatDateTime(row.lastProcessedAt)} ·
                     Next: {formatDateTime(row.nextEmailAt)}
                   </s-text>
                   <s-stack direction="inline" gap="base">

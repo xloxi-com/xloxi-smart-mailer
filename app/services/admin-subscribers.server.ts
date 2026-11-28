@@ -51,6 +51,7 @@ export async function listAdminSubscribers(filter: AdminSubscriberFilter) {
         currentCycleNumber: true,
         nextEmailAt: true,
         lastSuccessfulEmailAt: true,
+        lastProcessedAt: true,
         updatedAt: true,
         _count: {
           select: {
@@ -90,6 +91,7 @@ export async function listAdminSubscribers(filter: AdminSubscriberFilter) {
       productsSentTotal: row._count.productHistory,
       nextEmailAt: row.nextEmailAt?.toISOString() ?? null,
       lastSuccessfulEmailAt: row.lastSuccessfulEmailAt?.toISOString() ?? null,
+      lastProcessedAt: row.lastProcessedAt?.toISOString() ?? null,
       updatedAt: row.updatedAt.toISOString(),
     })),
   };

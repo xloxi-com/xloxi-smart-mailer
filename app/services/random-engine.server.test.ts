@@ -270,20 +270,21 @@ describe("random engine + email reservation", () => {
       });
       expect(result.status).toBe("reserved");
       if (result.status !== "reserved") return;
-      expect(result.job.products).toHaveLength(6);
+      expect(result.job.products).toHaveLength(DEFAULT_BATCH_SIZE);
     },
     180_000,
   );
 
   it("exhausts a cycle then starts a new one without empty cycles", async () => {
     await wipeCatalogAndJobs();
+    // 7 products / batch 4 → first 4, then 3, then new cycle of 4
     await seedProducts(shopId, 7, { prefix: "cycle" });
     const sub = await createSubscriber(shopId, "cycle-a");
 
     const first = await reserveAndAccept(sub.id, `cycle-a-1-${Date.now()}`);
     expect(first.reserved.status).toBe("reserved");
     if (first.reserved.status !== "reserved") return;
-    expect(first.reserved.job.products).toHaveLength(6);
+    expect(first.reserved.job.products).toHaveLength(DEFAULT_BATCH_SIZE);
     expect(first.reserved.job.cycleNumber).toBe(1);
 
     const hist1 = await countHistoryInCycle(prisma, {
@@ -291,13 +292,13 @@ describe("random engine + email reservation", () => {
       subscriberId: sub.id,
       cycleNumber: 1,
     });
-    expect(hist1).toBe(6);
+    expect(hist1).toBe(DEFAULT_BATCH_SIZE);
 
     const second = await reserveAndAccept(sub.id, `cycle-a-2-${Date.now()}`);
     if (second.reserved.status !== "reserved") {
       throw new Error("expected second reserved");
     }
-    expect(second.reserved.job.products).toHaveLength(1);
+    expect(second.reserved.job.products).toHaveLength(3);
     expect(second.reserved.job.cycleNumber).toBe(1);
     expect(second.reserved.startedNewCycle).toBe(false);
 
@@ -310,7 +311,7 @@ describe("random engine + email reservation", () => {
     if (third.status !== "reserved") return;
     expect(third.startedNewCycle).toBe(true);
     expect(third.job.cycleNumber).toBe(2);
-    expect(third.job.products).toHaveLength(6);
+    expect(third.job.products).toHaveLength(DEFAULT_BATCH_SIZE);
 
     const refreshed = await prisma.subscriber.findUniqueOrThrow({
       where: { id: sub.id },
@@ -386,7 +387,10 @@ describe("random engine + email reservation", () => {
     });
     expect(result.status).toBe("reserved");
     if (result.status !== "reserved") return;
-    expect(result.job.products).toHaveLength(5);
+    // 8 seeded − 3 ineligible = 5 eligible; batch capped at DEFAULT_BATCH_SIZE
+    expect(result.job.products).toHaveLength(
+      Math.min(DEFAULT_BATCH_SIZE, 5),
+    );
     const selected = new Set(result.job.products.map((p) => p.productId));
     expect(selected.has(ids[0])).toBe(false);
     expect(selected.has(ids[1])).toBe(false);
@@ -412,14 +416,15 @@ describe("random engine + email reservation", () => {
 
   it("avoids previous-email products across cycle boundaries when alternatives exist", async () => {
     await wipeCatalogAndJobs();
-    await seedProducts(shopId, 12, { prefix: "boundary" });
+    // Exactly 2 full batches in cycle 1, then cycle 2 soft-excludes the previous email.
+    await seedProducts(shopId, DEFAULT_BATCH_SIZE * 2, { prefix: "boundary" });
     const sub = await createSubscriber(shopId, "boundary");
 
     const first = await reserveAndAccept(sub.id, `bnd-1-${Date.now()}`);
     if (first.reserved.status !== "reserved") throw new Error("fail");
     const firstIds = new Set(first.reserved.job.products.map((p) => p.productId));
 
-    // Exhaust remaining 6 in cycle 1
+    // Exhaust remaining products in cycle 1
     await reserveAndAccept(sub.id, `bnd-2-${Date.now()}`);
 
     const third = await reserveEmailBatch({
@@ -432,7 +437,6 @@ describe("random engine + email reservation", () => {
     expect(third.startedNewCycle).toBe(true);
     expect(third.job.cycleNumber).toBe(2);
 
-    // Previous accepted email was the second (last 6 of cycle 1), not first.
     // Soft-exclude applies to the immediately previous email's products.
     const prev = await prisma.emailJob.findFirst({
       where: { shopId, subscriberId: sub.id, status: EmailJobStatus.ACCEPTED },
@@ -448,7 +452,8 @@ describe("random engine + email reservation", () => {
 
   it("allows different subscribers to receive the same product", async () => {
     await wipeCatalogAndJobs();
-    await seedProducts(shopId, 6, { prefix: "shared" });
+    // Catalog size == batch size so both subscribers get the full identical set.
+    await seedProducts(shopId, DEFAULT_BATCH_SIZE, { prefix: "shared" });
     const a = await createSubscriber(shopId, "share-a");
     const b = await createSubscriber(shopId, "share-b");
 

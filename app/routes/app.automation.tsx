@@ -90,8 +90,13 @@ export default function AutomationPage() {
               label="Optional app scheduler (tags due subscribers with xloxi-request)"
               defaultChecked={form.appSchedulerEnabled}
             />
+            <s-paragraph>
+              Cadence is fixed to Monday and Thursday (UTC). Interval days only
+              sizes the first-send stagger window — it does not skip Mon/Thu
+              slots.
+            </s-paragraph>
             <s-number-field
-              label="Interval (days)"
+              label="Stagger window (days, first send only)"
               name="intervalDays"
               min={1}
               max={30}
@@ -99,7 +104,7 @@ export default function AutomationPage() {
               defaultValue={String(form.intervalDays)}
             />
             <s-number-field
-              label="Products per email"
+              label="Products per email (default 4)"
               name="productsPerEmail"
               min={1}
               max={12}

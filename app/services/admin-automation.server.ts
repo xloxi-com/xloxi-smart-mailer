@@ -29,7 +29,7 @@ export function settingsToAutomationForm(
   return {
     automationEnabled: settings?.automationEnabled ?? false,
     intervalDays: settings?.intervalDays ?? 3,
-    productsPerEmail: settings?.productsPerEmail ?? 6,
+    productsPerEmail: settings?.productsPerEmail ?? 4,
     randomSelection: settings?.randomSelection ?? true,
     inStockOnly: settings?.inStockOnly ?? true,
     preventDuplicates: settings?.preventDuplicates ?? true,
@@ -47,7 +47,7 @@ export function readAutomationForm(form: FormData): AutomationFormFields {
   return {
     automationEnabled: on("automationEnabled"),
     intervalDays: clampInt(form.get("intervalDays"), 1, 30, 3),
-    productsPerEmail: clampInt(form.get("productsPerEmail"), 1, 12, 6),
+    productsPerEmail: clampInt(form.get("productsPerEmail"), 1, 12, 4),
     randomSelection: on("randomSelection"),
     inStockOnly: on("inStockOnly"),
     preventDuplicates: on("preventDuplicates"),

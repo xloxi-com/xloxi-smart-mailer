@@ -54,21 +54,18 @@ async function isStaleResourceUpdate(event: WebhookEvent): Promise<boolean> {
     const mirrorAt = product?.shopifyUpdatedAt ?? product?.lastSyncedAt;
     if (mirrorAt && mirrorAt > event.resourceUpdatedAt) return true;
   }
-  if (
-    (key.startsWith("customers/") ||
-      key === "customers_email_marketing_consent/update") &&
-    !key.endsWith("/delete") &&
-    key !== "customers/redact" &&
-    key !== "customers/data_request"
-  ) {
+  // Never stale-skip customers/update — Flow tags/metafields must always run.
+  // Local subscriber.updatedAt is bumped by our own tag/metafield writes and
+  // would otherwise drop acknowledgement webhooks as "stale_out_of_order".
+  if (key === "customers_email_marketing_consent/update") {
     const sub = await prisma.subscriber.findFirst({
       where: {
         shopId: event.shopId,
         shopifyCustomerGid: event.resourceGid,
       },
-      select: { updatedAt: true, consentUpdatedAt: true },
+      select: { consentUpdatedAt: true },
     });
-    const mirrorAt = sub?.consentUpdatedAt ?? sub?.updatedAt;
+    const mirrorAt = sub?.consentUpdatedAt;
     if (mirrorAt && mirrorAt > event.resourceUpdatedAt) return true;
   }
   return false;
@@ -210,16 +207,32 @@ async function processEventBody(event: WebhookEvent): Promise<void> {
       const { processCustomerFlowUpdate } = await import(
         "../services/flow-selection.server"
       );
-      await processCustomerFlowUpdate({
+      const flowResult = await processCustomerFlowUpdate({
         client: admin,
         shopDomain,
         shopId: shopRow.id,
         customerGid,
         intervalDays: settings?.intervalDays ?? 3,
-        productsPerEmail: settings?.productsPerEmail ?? 6,
+        productsPerEmail: settings?.productsPerEmail ?? 4,
         inStockOnly: settings?.inStockOnly !== false,
         automationEnabled: settings?.automationEnabled === true,
         testMode: settings?.testMode !== false,
+      });
+      logger.info("flow_customer_update_processed", {
+        shop: shopDomain,
+        customerGid,
+        status: flowResult.status,
+        reason:
+          flowResult.status === "skipped" || flowResult.status === "failed"
+            ? flowResult.reason
+            : undefined,
+        batchId:
+          flowResult.status === "ready" ||
+          flowResult.status === "acknowledged"
+            ? flowResult.batchId
+            : undefined,
+        productCount:
+          flowResult.status === "ready" ? flowResult.productCount : undefined,
       });
     }
     return;

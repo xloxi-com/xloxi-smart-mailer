@@ -10,7 +10,7 @@ Compatible with **Shopify Basic** (no Plus-only custom Flow extensions, no Send 
 | Tag | Who writes it | Purpose |
 | --- | --- | --- |
 | `xloxi-request` | Flow (Workflow A) or optional app scheduler | Request a product selection |
-| `xloxi-pick:PRODUCT_HANDLE` | XLOXI app | Selected product handles (up to 6) |
+| `xloxi-pick:PRODUCT_HANDLE` | XLOXI app | Selected product handles (default 4) |
 | `xloxi-ready` | XLOXI app (last write) | Signal Messaging / Workflow B |
 
 ## Customer metafields (`xloxi` namespace)
@@ -26,14 +26,14 @@ Create via **Shopify Flow Integration → Test integration (metafields)** in the
 
 ## Workflow A — Request selection
 
-1. **Trigger:** Scheduled time (e.g. every day or every 3 days).
+1. **Trigger:** Scheduled time on **Monday** and **Thursday** (align with app Mon/Thu UTC slots).
 2. **Get customer data** — filter marketing email consent = **Subscribed**.  
    Shopify limits **100 customers per Get customer data action**. For larger lists:
    - Chain multiple Get customer data steps with filters / offsets, **or**
    - Enable the optional **app scheduler** in Automation (tags due subscribers with `xloxi-request` in chunks of ≤100).
 3. **Action:** Add customer tag `xloxi-request`.
 
-XLOXI receives `customers/update`, verifies consent + next eligible date, reserves products, writes pick tags + metafields, adds `xloxi-ready`, removes `xloxi-request`.
+XLOXI receives `customers/update`, verifies consent, reserves **4** in-stock products (configurable), writes pick tags + metafields, adds `xloxi-ready`, removes `xloxi-request`. Never-sent subscribers are not blocked by a future staggered `nextEmailAt` when the request tag is present. After a completed send, early request tags are dropped until the next Mon/Thu slot.
 
 ## Workflow B — Send via Messaging
 

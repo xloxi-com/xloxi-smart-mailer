@@ -141,7 +141,7 @@ export async function processClaimedEmailJob(
   if (job.attemptCount <= 1) {
     readyJob = await revalidateJobProductsBeforeFirstSend(job.id, {
       inStockOnly: shop.automationSettings.inStockOnly !== false,
-      batchSize: shop.automationSettings.productsPerEmail ?? 6,
+      batchSize: shop.automationSettings.productsPerEmail ?? 4,
     });
     if (readyJob.status === EmailJobStatus.CANCELLED) {
       return { outcome: "skipped", reason: "no_eligible_products" };
