@@ -8,13 +8,16 @@ declare global {
 /**
  * Reuse one PrismaClient per serverless isolate.
  *
- * Prefer DIRECT_URL whenever set. The transaction-pooler DATABASE_URL with
- * `connection_limit=1` starves concurrent Admin requests during product sync
- * (pool timeout → "The operation timed out" / Catalog stuck empty).
+ * Production MUST use pooled DATABASE_URL (IPv4 pooler). DIRECT_URL (port 5432)
+ * often fails on Vercel (IPv6-only) and crashes the embedded app with
+ * "Application Error". Local/dev may use DIRECT_URL to avoid pool starvation
+ * during long sync ticks.
  */
 function resolveDatasourceUrl(): string | undefined {
-  const direct = process.env.DIRECT_URL?.trim();
-  if (direct) return direct;
+  const isDev = process.env.NODE_ENV !== "production";
+  if (isDev && process.env.DIRECT_URL?.trim()) {
+    return process.env.DIRECT_URL.trim();
+  }
   return process.env.DATABASE_URL?.trim() || undefined;
 }
 
