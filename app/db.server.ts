@@ -7,15 +7,14 @@ declare global {
 
 /**
  * Reuse one PrismaClient per serverless isolate.
- * Production: pooled DATABASE_URL with connection_limit=1.
- * Local `shopify app dev`: prefer DIRECT_URL so catalog loaders are not starved
- * while a product-sync tick holds the single pooler connection.
+ *
+ * Prefer DIRECT_URL whenever set. The transaction-pooler DATABASE_URL with
+ * `connection_limit=1` starves concurrent Admin requests during product sync
+ * (pool timeout → "The operation timed out" / Catalog stuck empty).
  */
 function resolveDatasourceUrl(): string | undefined {
-  const isDev = process.env.NODE_ENV !== "production";
-  if (isDev && process.env.DIRECT_URL?.trim()) {
-    return process.env.DIRECT_URL.trim();
-  }
+  const direct = process.env.DIRECT_URL?.trim();
+  if (direct) return direct;
   return process.env.DATABASE_URL?.trim() || undefined;
 }
 

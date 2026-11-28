@@ -321,10 +321,10 @@ export async function getProductSyncStatus(shopDomain: string) {
   };
 }
 
-/** Cancel RUNNING/PENDING product syncs older than `staleAfterMs` (default 2m). */
+/** Cancel RUNNING/PENDING product syncs older than `staleAfterMs` (default 45s). */
 export async function cancelStaleProductSyncJobs(
   shopDomain: string,
-  staleAfterMs = 2 * 60_000,
+  staleAfterMs = 45_000,
 ): Promise<number> {
   const shop = await ensureShop(shopDomain);
   const cutoff = new Date(Date.now() - staleAfterMs);

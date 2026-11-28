@@ -5,14 +5,16 @@
 import type { AdminGraphqlClient } from "../shopify/admin-graphql.server";
 import { adminGraphql } from "../shopify/admin-graphql.server";
 
-/** Keep pages small so each Sync POST finishes before proxy/Vercel timeouts. */
-export const PRODUCT_SYNC_PAGE_SIZE = 10;
+/** Tiny pages — each Sync POST must finish well under proxy/Vercel limits. */
+export const PRODUCT_SYNC_PAGE_SIZE = 5;
 /** Catalogs at or above this size use Bulk Operations instead of deep pagination. */
-export const BULK_SYNC_THRESHOLD = 500;
+export const BULK_SYNC_THRESHOLD = 2000;
 /** One GraphQL page per tick — resumable; UI auto-continues with sync_tick. */
 export const PAGES_PER_TICK = 1;
-/** Soft wall-clock budget per tick (single page should finish well under this). */
-export const PRODUCT_SYNC_TICK_BUDGET_MS = 8_000;
+/** Soft wall-clock budget; return early mid-page (seenGids skip on resume). */
+export const PRODUCT_SYNC_TICK_BUDGET_MS = 6_000;
+/** Max products upserted per tick even if the GraphQL page is larger. */
+export const PRODUCT_SYNC_MAX_UPSERTS_PER_TICK = 5;
 
 export type ShopifyMoney = {
   amount: string;
@@ -23,7 +25,7 @@ export type ShopifyVariantNode = {
   id: string;
   title: string | null;
   sku: string | null;
-  barcode: string | null;
+  barcode?: string | null;
   price: string;
   compareAtPrice: string | null;
   inventoryQuantity: number | null;
@@ -58,6 +60,7 @@ export type ShopifyProductNode = {
   };
 };
 
+/** Minimal fields — heavy variant payloads were timing out first sync ticks. */
 const PRODUCT_FIELDS = `
   id
   title
@@ -73,12 +76,11 @@ const PRODUCT_FIELDS = `
     minVariantPrice { amount currencyCode }
     maxVariantPrice { amount currencyCode }
   }
-  variants(first: 50) {
+  variants(first: 15) {
     nodes {
       id
       title
       sku
-      barcode
       price
       compareAtPrice
       inventoryQuantity
@@ -87,7 +89,6 @@ const PRODUCT_FIELDS = `
       updatedAt
       inventoryItem { id tracked }
     }
-    pageInfo { hasNextPage endCursor }
   }
 `;
 
@@ -105,7 +106,7 @@ export async function fetchProductsCount(
           count
         }
       }`,
-    { shop },
+    { shop, maxAttempts: 2, baseDelayMs: 200 },
   );
   return data.productsCount.count;
 }

@@ -263,11 +263,11 @@ export default function ProductsPage() {
       if (!isLoading) return;
       syncStartedAt.current = null;
       shopify.toast.show(
-        "Product sync timed out. Click Sync products to continue.",
+        "Sync is taking longer than expected. Click Sync products to continue.",
         { isError: true },
       );
       revalidator.revalidate();
-    }, 45_000);
+    }, 25_000);
     return () => window.clearTimeout(timer);
   }, [isLoading, isSyncIntent, shopify, revalidator]);
 

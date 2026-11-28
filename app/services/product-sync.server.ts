@@ -18,6 +18,7 @@ import type { AdminGraphqlClient } from "../shopify/admin-graphql.server";
 import {
   BULK_SYNC_THRESHOLD,
   PAGES_PER_TICK,
+  PRODUCT_SYNC_MAX_UPSERTS_PER_TICK,
   PRODUCT_SYNC_TICK_BUDGET_MS,
   fetchBulkOperation,
   fetchProductById,
@@ -221,7 +222,7 @@ export async function upsertMirroredProduct(
         shopifyVariantGid: v.id,
         title: v.title,
         sku: v.sku,
-        barcode: v.barcode,
+        barcode: v.barcode ?? null,
         price: sellable ? new Prisma.Decimal(v.price) : null,
         compareAtPrice:
           sellable && v.compareAtPrice
@@ -239,7 +240,7 @@ export async function upsertMirroredProduct(
         productId: product.id,
         title: v.title,
         sku: v.sku,
-        barcode: v.barcode,
+        barcode: v.barcode ?? null,
         price: sellable ? new Prisma.Decimal(v.price) : null,
         compareAtPrice:
           sellable && v.compareAtPrice
@@ -379,21 +380,13 @@ export async function runProductSyncTick(
   const pagesPerTick = options.pagesPerTick ?? PAGES_PER_TICK;
   const tickBudgetMs = options.tickBudgetMs ?? PRODUCT_SYNC_TICK_BUDGET_MS;
   const tickStartedAt = Date.now();
-  // Avoid recounting Shopify on every resume tick — count is stable for a job.
+  const maxUpserts = PRODUCT_SYNC_MAX_UPSERTS_PER_TICK;
+  // Skip productsCount on the hot path — it was hanging first ticks on some shops.
+  // Only count when we already know we might need bulk (resume with knownCount).
   let count: number | null =
     typeof options.knownCount === "number" ? options.knownCount : null;
-  if (count == null && !options.cursor && !options.bulkOperationId) {
-    try {
-      count = await fetchProductsCount(client, options.shopDomain);
-    } catch (error) {
-      logger.warn("product_sync_count_failed", {
-        shop: options.shopDomain,
-        error: toMerchantSafeError(error, "count_failed"),
-      });
-    }
-  }
 
-  // Resume or start bulk path for large catalogs.
+  // Resume or start bulk path for large catalogs / in-flight bulk ops.
   if (
     !options.forcePagination &&
     (options.bulkOperationId ||
@@ -412,17 +405,10 @@ export async function runProductSyncTick(
   let cursor = options.cursor ?? null;
   let hasNextPage = true;
   const seenGids = [...(options.seenGids ?? [])];
+  const seenSet = new Set(seenGids);
+  let upsertsThisTick = 0;
 
   for (let page = 0; page < pagesPerTick && hasNextPage; page++) {
-    // Only stop between pages so cursor always advances (no mid-page stall loop).
-    if (page > 0 && Date.now() - tickStartedAt >= tickBudgetMs) {
-      stats.hasMore = true;
-      stats.phase = "pagination_budget";
-      stats.cursor = cursor;
-      stats.seenGids = seenGids;
-      return stats;
-    }
-
     try {
       const result = await fetchProductsPage(client, options.shopDomain, {
         cursor,
@@ -430,6 +416,20 @@ export async function runProductSyncTick(
       });
 
       for (const node of result.products) {
+        if (seenSet.has(node.id)) continue;
+
+        if (
+          upsertsThisTick >= maxUpserts ||
+          Date.now() - tickStartedAt >= tickBudgetMs
+        ) {
+          // Keep the same page cursor; resume skips seenGids.
+          stats.hasMore = true;
+          stats.phase = "pagination_budget";
+          stats.cursor = cursor;
+          stats.seenGids = seenGids;
+          return stats;
+        }
+
         try {
           const upserted = await upsertMirroredProduct(
             options.shopId,
@@ -439,13 +439,18 @@ export async function runProductSyncTick(
           );
           stats.processed += 1;
           stats.upserted += 1;
+          upsertsThisTick += 1;
           if (upserted.eligible) stats.eligible += 1;
           seenGids.push(node.id);
+          seenSet.add(node.id);
         } catch (error) {
           stats.errors += 1;
           stats.partialErrors.push(
             toMerchantSafeError(error, "upsert_failed"),
           );
+          // Still mark seen so one bad product cannot block the tick forever.
+          seenGids.push(node.id);
+          seenSet.add(node.id);
         }
       }
 
