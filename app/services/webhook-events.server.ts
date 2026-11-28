@@ -127,7 +127,8 @@ export async function claimWebhookEvent(options: {
 export async function markWebhookProcessing(
   eventId: string,
   leaseOwner: string,
-  leaseMs = 60_000,
+  /** Flow selection needs multiple Admin GraphQL round-trips. */
+  leaseMs = 120_000,
 ): Promise<WebhookEvent | null> {
   const now = new Date();
   const updated = await prisma.webhookEvent.updateMany({

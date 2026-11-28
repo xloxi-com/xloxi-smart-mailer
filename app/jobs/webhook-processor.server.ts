@@ -3,6 +3,7 @@
  * Heavy Shopify GraphQL work happens here, not in the HTTP ingress path.
  */
 import type { Prisma, WebhookEvent } from "@prisma/client";
+import { waitUntil } from "@vercel/functions";
 import prisma from "../db.server";
 import { logger } from "../lib/logging.server";
 import { getOfflineAdmin } from "../shopify/offline-admin.server";
@@ -26,8 +27,33 @@ import {
   markWebhookSucceeded,
 } from "../services/webhook-events.server";
 
+/**
+ * Shopify Admin webhook topics arrive as CUSTOMERS_UPDATE (enum style).
+ * Handlers expect slash form (customers/update). Path segments that contain
+ * underscores (email_marketing_consent) must stay intact — do not naively
+ * replace every underscore with a slash.
+ */
+const WEBHOOK_TOPIC_MAP: Record<string, string> = {
+  app_uninstalled: "app/uninstalled",
+  app_scopes_update: "app/scopes_update",
+  products_create: "products/create",
+  products_update: "products/update",
+  products_delete: "products/delete",
+  inventory_levels_update: "inventory_levels/update",
+  customers_create: "customers/create",
+  customers_update: "customers/update",
+  customers_delete: "customers/delete",
+  customers_email_marketing_consent_update:
+    "customers/email_marketing_consent/update",
+  customers_data_request: "customers/data_request",
+  customers_redact: "customers/redact",
+  shop_redact: "shop/redact",
+};
+
 function topicKey(topic: string): string {
-  return topic.toLowerCase();
+  const lower = topic.toLowerCase().trim();
+  if (lower.includes("/")) return lower;
+  return WEBHOOK_TOPIC_MAP[lower] ?? lower;
 }
 
 function safePayload(event: WebhookEvent): Record<string, unknown> {
@@ -57,7 +83,7 @@ async function isStaleResourceUpdate(event: WebhookEvent): Promise<boolean> {
   // Never stale-skip customers/update — Flow tags/metafields must always run.
   // Local subscriber.updatedAt is bumped by our own tag/metafield writes and
   // would otherwise drop acknowledgement webhooks as "stale_out_of_order".
-  if (key === "customers_email_marketing_consent/update") {
+  if (key === "customers/email_marketing_consent/update") {
     const sub = await prisma.subscriber.findFirst({
       where: {
         shopId: event.shopId,
@@ -182,7 +208,7 @@ async function processEventBody(event: WebhookEvent): Promise<void> {
   if (
     topic === "customers/create" ||
     topic === "customers/update" ||
-    topic === "customers_email_marketing_consent/update"
+    topic === "customers/email_marketing_consent/update"
   ) {
     const customerGid =
       event.resourceGid ??
@@ -399,12 +425,27 @@ export async function processDueWebhookEvents(options?: {
   return { processed: due.length, succeeded, failed };
 }
 
-/** Fire-and-forget after HTTP ack (best-effort immediate processing). */
+/**
+ * Continue processing after the webhook HTTP 200.
+ * On Vercel, plain `void` work is frozen when the isolate returns — use waitUntil.
+ * Also used when Shopify retries a delivery while the prior event is still PENDING.
+ */
 export function scheduleWebhookProcessing(eventId: string): void {
-  void processWebhookEventById(eventId, "ingress-inline").catch((error) => {
-    logger.error("webhook_inline_schedule_failed", {
-      eventId,
-      name: error instanceof Error ? error.name : "unknown",
+  const work = processWebhookEventById(eventId, "ingress-inline")
+    .then((result) => {
+      logger.info("webhook_inline_processed", {
+        eventId,
+        status: result.status,
+      });
+    })
+    .catch((error) => {
+      logger.error("webhook_inline_schedule_failed", {
+        eventId,
+        name: error instanceof Error ? error.name : "unknown",
+        message: error instanceof Error ? error.message.slice(0, 200) : "unknown",
+      });
     });
-  });
+
+  // Registers continuation before the webhook response finishes leaving the isolate.
+  waitUntil(work);
 }

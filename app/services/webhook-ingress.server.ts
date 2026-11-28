@@ -42,10 +42,20 @@ export async function acceptShopifyWebhook(
   });
 
   if (enqueued.duplicate) {
+    // Shopify retries while the first delivery is still PENDING/stuck — re-drive.
+    const existing = enqueued.event;
+    if (
+      existing &&
+      (existing.status === "PENDING" ||
+        existing.status === "FAILED" ||
+        existing.status === "PROCESSING")
+    ) {
+      scheduleWebhookProcessing(existing.id);
+    }
     return {
       ok: true,
       duplicate: true,
-      eventId: enqueued.event?.id ?? null,
+      eventId: existing?.id ?? null,
     };
   }
 
